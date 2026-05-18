@@ -8,6 +8,10 @@ const auth = require("./routes/auth");
 const quarters = require("./routes/quarters");
 const applications = require("./routes/applications");
 const admin = require("./routes/admin");
+const allotmentCategories = require("./routes/allotmentCategories");
+const allotmentHods = require("./routes/allotmentHods");
+const employee = require("./routes/employee");
+const estateQuarters = require("./routes/estateQuarters");
 
 function createApp() {
   const app = express();
@@ -32,6 +36,10 @@ function createApp() {
   app.use("/api/quarters", quarters);
   app.use("/api/applications", applications);
   app.use("/api/admin", admin);
+  app.use("/api/allotment-categories", allotmentCategories);
+  app.use("/api/allotment-hods", allotmentHods);
+  app.use("/api/employee", employee);
+  app.use("/api/estate-quarters", estateQuarters);
 
   app.use((err, req, res, next) => {
     // eslint-disable-next-line no-unused-vars
@@ -44,4 +52,3 @@ function createApp() {
 }
 
 module.exports = { createApp };
-

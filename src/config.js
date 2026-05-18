@@ -13,7 +13,7 @@ module.exports = {
   port: Number(env("PORT", "5000")),
   nodeEnv: env("NODE_ENV", "development"),
   jwtSecret: env("JWT_SECRET", ""),
-  allowedOrigins: env("ALLOWED_ORIGINS", "http://localhost:5173")
+  allowedOrigins: env("ALLOWED_ORIGINS", "http://localhost:5174")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
