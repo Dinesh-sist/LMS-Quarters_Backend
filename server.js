@@ -1,7 +1,7 @@
 require("dotenv").config();
-const { createApp } = require("./app");
-const { port } = require("./config");
-const { getPool } = require("./db");
+const { createApp } = require("./src/app");
+const { port } = require("./src/config");
+const { getPool } = require("./src/db");
 
 async function main() {
   await getPool(); // fail-fast on DB connectivity
