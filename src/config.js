@@ -21,7 +21,7 @@ module.exports = {
     server: env("DB_SERVER", "localhost"),
     port: Number(env("DB_PORT", "1433")),
     database: env("DB_DATABASE", "LMSQuarters"),
-    user: env("DB_USER", "sa"),
+    user: env("DB_USER", "lms"),
     password: env("DB_PASSWORD", ""),
     encrypt: envBool("DB_ENCRYPT", false),
     trustServerCertificate: envBool("DB_TRUST_SERVER_CERT", true)
