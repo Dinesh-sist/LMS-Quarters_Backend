@@ -18,6 +18,7 @@ module.exports = {
     .map((s) => s.trim())
     .filter(Boolean),
   db: {
+    
     server: env("DB_SERVER", "localhost"),
     port: Number(env("DB_PORT", "1433")),
     database: env("DB_DATABASE", "lmsQUARTERS"),
@@ -27,6 +28,11 @@ module.exports = {
     trustServerCertificate: envBool("DB_TRUST_SERVER_CERT", true)
   }
 };
+
+
+
+
+
 
 
 

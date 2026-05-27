@@ -19,11 +19,17 @@ ELSE
     );
 }
 
+
+
+
+
+
+
 async function main() {
   const pool = await getPool();
   await upsertUser(pool, "admin", "admin123", "admin");
   await upsertUser(pool, "employee", "employee123", "employee");
-
+  
   await pool.request().query(
     `
 IF NOT EXISTS (SELECT 1 FROM dbo.Quarters WHERE QuarterNo='Q-101')
@@ -43,4 +49,6 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+
 
