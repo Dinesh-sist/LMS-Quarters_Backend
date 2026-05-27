@@ -3,35 +3,53 @@ const { getPool } = require("../db");
 
 const router = express.Router();
 
-// Vacant estate quarters listing
 router.get("/vacant", async (req, res) => {
-  const pool = await getPool();
-  const result = await pool
-    .request()
-    .query(
-      `
-SELECT
-  CAST(OBJECTID AS INT) AS Id,
-  CAST(CATEGORY AS NVARCHAR(64)) AS QuarterType,
-  CAST(AREA_TYPE AS NVARCHAR(64)) AS AreaType,
-  CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QuarterNo
-FROM dbo.Estate_Quarters
-WHERE UPPER(LTRIM(RTRIM(CAST(STATUS1 AS NVARCHAR(32))))) = 'VACANT'
-ORDER BY OBJECTID DESC
-`
-    );
+  const { classId } = req.query;
 
-  // Keep compatibility with existing frontend table expectations (Location used as "Area Type")
-  const items = result.recordset.map((r) => ({
-    Id: r.Id,
-    QuarterType: r.QuarterType,
-    Location: r.AreaType,
-    QuarterNo: r.QuarterNo,
-    IsAvailable: true
-  }));
+  if (!classId) {
+    return res.status(400).json({ error: "classId is required" });
+  }
 
-  return res.json({ items });
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("ClassId", parseInt(classId))
+      .query(
+        `
+        SELECT
+            CAST(eq.OBJECTID AS INT)                   AS Id,
+            CAST(eq.CATEGORY AS NVARCHAR(64))          AS QuarterType,
+            CAST(eq.AREA_TYPE AS NVARCHAR(64))         AS AreaType,
+            CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))  AS QuarterNo
+        FROM [LMSQuarters].[dbo].[Estate_Quarters] eq
+        WHERE 
+            UPPER(LTRIM(RTRIM(CAST(eq.STATUS1 AS NVARCHAR(32))))) = 'VACANT'
+            AND CAST(eq.CATEGORY AS NVARCHAR(64)) IN (
+                SELECT CAST(qat.QTR_TYPE AS NVARCHAR(64))
+                FROM [LMSQuarters].[dbo].[Quarter_Emp_Class] qec
+                JOIN [LMSQuarters].[dbo].[Quarter_Allotment_Type] qat
+                    ON qat.QTR_ID = qec.QTR_ID
+                WHERE qec.Class_ID = @ClassId
+            )
+        ORDER BY eq.OBJECTID DESC
+        `
+      );
+
+    const items = result.recordset.map((r) => ({
+      Id: r.Id,
+      QuarterType: r.QuarterType,
+      Location: r.AreaType,
+      QuarterNo: r.QuarterNo,
+      IsAvailable: true
+    }));
+
+    return res.json({ items });
+
+  } catch (err) {
+    console.error("Error fetching vacant quarters:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 module.exports = router;
-
