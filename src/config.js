@@ -15,6 +15,7 @@ const allowedOrigins = env("ALLOWED_ORIGINS", "http://localhost:5174")
   .map((s) => s.trim())
   .filter(Boolean);
 
+  
 
 module.exports = {
   port: Number(env("PORT", "5000")),
@@ -22,7 +23,7 @@ module.exports = {
   jwtSecret: env("JWT_SECRET", ""),
   allowedOrigins, // ✅ just reference the variable
   db: {
-    
+
     server: env("DB_SERVER", "localhost"),
     port: Number(env("DB_PORT", "1433")),
     database: env("DB_DATABASE", "lmsQUARTERS"),
