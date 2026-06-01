@@ -6,13 +6,120 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const router = express.Router();
 
 router.use(requireAuth);
-router.use(requireRole("admin"));
+router.use(requireRole("admin","employee"));
 
 router.get("/applications", async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(
     "SELECT a.Id, a.Status, a.Notes, a.CreatedAt, a.UpdatedAt, u.Username, u.Role, q.QuarterNo, q.QuarterType, q.Location FROM dbo.Applications a JOIN dbo.Users u ON u.Id=a.UserId LEFT JOIN dbo.Quarters q ON q.Id=a.QuarterId ORDER BY a.Id DESC"
   );
+  return res.json({ items: result.recordset });
+});
+
+router.get("/verify-quarter-applications", async (req, res) => {
+  const pool = await getPool();
+  const result = await pool.request().query(`
+    SELECT
+      id,
+      appNo,
+      empId,
+      empName,
+      [class],
+      CONVERT(varchar(10), gradDate, 23) AS gradDate,
+      CONVERT(varchar(10), dateOfJoin, 23) AS dateOfJoin,
+      basic,
+      CONVERT(varchar(10), dob, 23) AS dob,
+      dept,
+      casteID,
+      currentQtr,
+      currentQtrType,
+      requestedQtr,
+      requestedQtrLocation,
+      requestedQtrType,
+      exchangeQtr,
+      proofFile,
+      CONVERT(varchar(10), requestedDate, 23) AS requestedDate,
+      stage
+    FROM dbo.VerifyQuarterApplications
+    ORDER BY appNo DESC
+  `);
+  return res.json({ items: result.recordset });
+});
+
+
+router.get("/check-approval", async (req, res) => {
+    const pool = await getPool();
+    
+    const result = await pool.request().query(`
+      SELECT
+        [Id],
+        [PriorityNo] AS Priority,
+        [UserId],
+        [EmpId],
+        [EmpName],
+        [Class],
+        [Caste] AS cast,
+        [AllotCatId],
+        [EmailId],
+        CONVERT(varchar(10), [ReqDate], 23) AS reqdate,
+        [QtrRequested],
+        [QtrLocation],
+        [QtrType] AS Qtrtype,
+        [Reason],
+        [ExchangeReason],
+        [AttachmentPath],
+        [Status],
+        [CreatedAt],
+        [UpdatedAt]
+      FROM dbo.CheckApproval
+      ORDER BY [Id] DESC
+    `);
+    
+    return res.json({ items: result.recordset });
+  
+});
+
+router.get("/status-of-applications", async (req, res) => {
+  const pool = await getPool();
+  const result = await pool.request().query(`
+    SELECT
+      id,
+      appNo,
+      empId,
+      empName,
+      [class],
+      CONVERT(varchar(10), gradDate, 23) AS gradDate,
+      CONVERT(varchar(10), dateOfJoin, 23) AS dateOfJoin,
+      basic,
+      CONVERT(varchar(10), dob, 23) AS dob,
+      dept,
+      casteId,
+      currentQtr,
+      currentQtyType,
+      reqQtr,
+      reqQtrLocation,
+      reqQtrType,
+      exchange,
+      proofFile,
+      CONVERT(varchar(10), reqDate, 23) AS reqDate,
+      rosterNo,
+      result
+    FROM dbo.StatusOfApplications
+    ORDER BY appNo DESC
+  `);
+  return res.json({ items: result.recordset });
+});
+
+router.get("/house-allotment-committee-history", async (req, res) => {
+  const pool = await getPool();
+  const result = await pool.request().query(`
+    SELECT
+      id,
+      CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
+      remarks
+    FROM dbo.HouseAllotmentCommitteeHistory
+    ORDER BY committeeHeld DESC
+  `);
   return res.json({ items: result.recordset });
 });
 
@@ -46,4 +153,3 @@ router.patch("/applications/:id", async (req, res) => {
 });
 
 module.exports = router;
-
