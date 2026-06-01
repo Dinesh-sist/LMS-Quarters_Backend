@@ -3,6 +3,8 @@ const cors = require("cors");
 const helmet = require("helmet");
 const { allowedOrigins } = require("./config");
 
+
+
 const health = require("./routes/health");
 const auth = require("./routes/auth");
 const quarters = require("./routes/quarters");

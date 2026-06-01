@@ -15,6 +15,9 @@ function getPool() {
         encrypt: db.encrypt,
         trustServerCertificate: db.trustServerCertificate
       },
+
+      
+
       pool: {
         max: 10,
         min: 0,
