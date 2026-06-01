@@ -6,7 +6,7 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const router = express.Router();
 
 router.use(requireAuth);
-router.use(requireRole("admin"));
+router.use(requireRole("admin","employee"));
 
 router.get("/applications", async (req, res) => {
   const pool = await getPool();
@@ -44,6 +44,39 @@ router.get("/verify-quarter-applications", async (req, res) => {
     ORDER BY appNo DESC
   `);
   return res.json({ items: result.recordset });
+});
+
+
+router.get("/check-approval", async (req, res) => {
+    const pool = await getPool();
+    
+    const result = await pool.request().query(`
+      SELECT
+        [Id],
+        [PriorityNo] AS Priority,
+        [UserId],
+        [EmpId],
+        [EmpName],
+        [Class],
+        [Caste] AS cast,
+        [AllotCatId],
+        [EmailId],
+        CONVERT(varchar(10), [ReqDate], 23) AS reqdate,
+        [QtrRequested],
+        [QtrLocation],
+        [QtrType] AS Qtrtype,
+        [Reason],
+        [ExchangeReason],
+        [AttachmentPath],
+        [Status],
+        [CreatedAt],
+        [UpdatedAt]
+      FROM dbo.CheckApproval
+      ORDER BY [Id] DESC
+    `);
+    
+    return res.json({ items: result.recordset });
+  
 });
 
 router.get("/status-of-applications", async (req, res) => {
