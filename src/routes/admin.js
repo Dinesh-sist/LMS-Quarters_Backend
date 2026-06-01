@@ -77,18 +77,18 @@ router.get("/status-of-applications", async (req, res) => {
   return res.json({ items: result.recordset });
 });
 
-router.get("/house-allotment-committee-history", async (req, res) => {
-  const pool = await getPool();
-  const result = await pool.request().query(`
-    SELECT
-      id,
-      CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
-      remarks
-    FROM dbo.HouseAllotmentCommitteeHistory
-    ORDER BY committeeHeld DESC
-  `);
-  return res.json({ items: result.recordset });
-});
+// router.get("/house-allotment-committee-history", async (req, res) => {
+//   const pool = await getPool();
+//   const result = await pool.request().query(`
+//     SELECT
+//       id,
+//       CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
+//       remarks
+//     FROM dbo.HistoryofAllotment
+//     ORDER BY committeeHeld DESC
+//   `);
+//   return res.json({ items: result.recordset });
+// });
 
 const UpdateStatusSchema = z.object({
   status: z.enum(["pending", "approved", "rejected", "cancelled"]),
