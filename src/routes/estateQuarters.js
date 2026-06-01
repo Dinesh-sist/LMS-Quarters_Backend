@@ -1,9 +1,10 @@
 const express = require("express");
-const { getPool } = require("../db");
+const { getPool, sql } = require("../db");
+const { requireAuth } = require("../middleware/auth");
 
 const router = express.Router();
 
-router.get("/vacant", async (req, res) => {
+router.get("/vacant", requireAuth, async (req, res) => {
   const { classId } = req.query;
 
   if (!classId) {
@@ -14,14 +15,14 @@ router.get("/vacant", async (req, res) => {
     const pool = await getPool();
     const result = await pool
       .request()
-      .input("ClassId", parseInt(classId))
-      .query(
-        `
+      .input("ClassId", sql.Int, parseInt(classId))
+      .query(`
         SELECT
             CAST(eq.OBJECTID AS INT)                   AS Id,
             CAST(eq.CATEGORY AS NVARCHAR(64))          AS QuarterType,
-            CAST(eq.AREA_TYPE AS NVARCHAR(64))         AS AreaType,
-            CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))  AS QuarterNo
+            CAST(eq.AREA_TYPE AS NVARCHAR(64))         AS Location,
+            CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))  AS QuarterNo,
+            'available' AS Status
         FROM [LMSQuarters].[dbo].[Estate_Quarters] eq
         WHERE 
             UPPER(LTRIM(RTRIM(CAST(eq.STATUS1 AS NVARCHAR(32))))) = 'VACANT'
@@ -33,18 +34,18 @@ router.get("/vacant", async (req, res) => {
                 WHERE qec.Class_ID = @ClassId
             )
         ORDER BY eq.OBJECTID DESC
-        `
-      );
+      `);
 
     const items = result.recordset.map((r) => ({
       Id: r.Id,
       QuarterType: r.QuarterType,
-      Location: r.AreaType,
+      Location: r.Location,
       QuarterNo: r.QuarterNo,
+      Status: r.Status,
       IsAvailable: true
     }));
 
-    return res.json({ items });
+    return res.json({ items, total: items.length });
 
   } catch (err) {
     console.error("Error fetching vacant quarters:", err);
