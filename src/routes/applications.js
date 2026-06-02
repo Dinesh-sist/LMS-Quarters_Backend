@@ -11,18 +11,21 @@ const CreateSchema = z.object({
 });
 
 router.post("/", requireAuth, async (req, res) => {
-  const parsed = CreateSchema.safeParse(req.body);
+  const quarterId = req.body.quarterId ? Number(req.body.quarterId) : null;
+  const notes = typeof req.body.notes === "string" && req.body.notes.trim().length > 0 ? req.body.notes.trim() : null;
+
+  const parsed = CreateSchema.safeParse({ quarterId, notes });
   if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
 
   const userId = Number(req.user.sub);
-  const { quarterId = null, notes = null } = parsed.data;
+  const { quarterId: parsedQuarterId = null, notes: parsedNotes = null } = parsed.data;
 
   const pool = await getPool();
   const result = await pool
     .request()
     .input("UserId", sql.Int, userId)
-    .input("QuarterId", sql.Int, quarterId)
-    .input("Notes", sql.NVarChar(400), notes)
+    .input("QuarterId", sql.Int, parsedQuarterId)
+    .input("Notes", sql.NVarChar(400), parsedNotes)
     .query(
       "INSERT INTO dbo.Applications (UserId, QuarterId, Status, Notes) OUTPUT INSERTED.Id VALUES (@UserId, @QuarterId, 'pending', @Notes)"
     );

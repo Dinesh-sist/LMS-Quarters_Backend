@@ -3,10 +3,14 @@ const { z } = require("zod");
 const { getPool, sql } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 
+
 const router = express.Router();
+
+
 
 router.use(requireAuth);
 router.use(requireRole("admin","employee"));
+
 
 router.get("/applications", async (req, res) => {
   const pool = await getPool();
@@ -15,6 +19,7 @@ router.get("/applications", async (req, res) => {
   );
   return res.json({ items: result.recordset });
 });
+
 
 router.get("/verify-quarter-applications", async (req, res) => {
   const pool = await getPool();
@@ -47,37 +52,6 @@ router.get("/verify-quarter-applications", async (req, res) => {
 });
 
 
-router.get("/check-approval", async (req, res) => {
-    const pool = await getPool();
-    
-    const result = await pool.request().query(`
-      SELECT
-        [Id],
-        [PriorityNo] AS Priority,
-        [UserId],
-        [EmpId],
-        [EmpName],
-        [Class],
-        [Caste] AS cast,
-        [AllotCatId],
-        [EmailId],
-        CONVERT(varchar(10), [ReqDate], 23) AS reqdate,
-        [QtrRequested],
-        [QtrLocation],
-        [QtrType] AS Qtrtype,
-        [Reason],
-        [ExchangeReason],
-        [AttachmentPath],
-        [Status],
-        [CreatedAt],
-        [UpdatedAt]
-      FROM dbo.Quarter_Applications
-      ORDER BY [Id] DESC
-    `);
-    
-    return res.json({ items: result.recordset });
-  
-});
 
 router.get("/status-of-applications", async (req, res) => {
   const pool = await getPool();
@@ -110,33 +84,36 @@ router.get("/status-of-applications", async (req, res) => {
   return res.json({ items: result.recordset });
 });
 
-// router.get("/house-allotment-committee-history", async (req, res) => {
-//   const pool = await getPool();
-//   const result = await pool.request().query(`
-//     SELECT
-//       id,
-//       CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
-//       remarks
-//     FROM dbo.HistoryofAllotment
-//     ORDER BY committeeHeld DESC
-//   `);
-//   return res.json({ items: result.recordset });
-// });
+router.get("/house-allotment-committee-history", async (req, res) => {
+  const pool = await getPool();
+  const result = await pool.request().query(`
+    SELECT
+      id,
+      CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
+      remarks
+    FROM dbo.HistoryofAllotment
+    ORDER BY committeeHeld DESC
+  `);
+  return res.json({ items: result.recordset });
+});
 
 const UpdateStatusSchema = z.object({
   status: z.enum(["pending", "approved", "rejected", "cancelled"]),
   notes: z.string().max(400).optional()
 });
 
+
 router.patch("/applications/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+
 
   const parsed = UpdateStatusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
 
   const { status, notes } = parsed.data;
   const pool = await getPool();
+
 
   const result = await pool
     .request()
@@ -153,3 +130,15 @@ router.patch("/applications/:id", async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+
+
+
+
+
