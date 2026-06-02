@@ -9,7 +9,7 @@ const router = express.Router();
 
 
 router.use(requireAuth);
-router.use(requireRole("admin"));
+router.use(requireRole("admin","employee"));
 
 
 router.get("/applications", async (req, res) => {

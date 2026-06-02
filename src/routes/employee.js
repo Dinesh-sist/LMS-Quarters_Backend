@@ -80,6 +80,7 @@ async function findQuarterEmpClass(pool, { classNo, type }) {
     return result.recordset?.[0] || null;
   }
 
+  // Try by class name first
   const byName = await pool
     .request()
     .input("LikeName", sql.NVarChar(40), `%class${classNo}%`)
@@ -88,14 +89,20 @@ async function findQuarterEmpClass(pool, { classNo, type }) {
     );
   if (byName.recordset?.[0]) return byName.recordset[0];
 
-  const fallbackPriority = classNo + 1;
-  const byPriority = await pool
+  const byClass = await pool
     .request()
-    .input("Priority", sql.Int, fallbackPriority)
+    .input("ClassName", sql.NVarChar(40), `%CLASS-${toRoman(classNo)}%`)
     .query(
-      "SELECT TOP 1 Class_ID, Class_PRIORITY, class_name, [Class] FROM dbo.Quarter_Emp_Class WHERE Class_PRIORITY=@Priority"
+      "SELECT TOP 1 Class_ID, Class_PRIORITY, class_name, [Class] FROM dbo.Quarter_Emp_Class WHERE UPPER([Class]) LIKE UPPER(@ClassName) ORDER BY Class_PRIORITY ASC"
     );
-  return byPriority.recordset?.[0] || null;
+  if (byClass.recordset?.[0]) return byClass.recordset[0];
+
+  return null;
+}
+
+function toRoman(n) {
+  const map = { 1: "I", 2: "II", 3: "III", 4: "IV" };
+  return map[n] || String(n);
 }
 
 router.post("/lookup", async (req, res) => {
