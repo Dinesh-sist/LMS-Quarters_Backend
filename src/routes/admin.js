@@ -71,7 +71,7 @@ router.get("/check-approval", async (req, res) => {
         [Status],
         [CreatedAt],
         [UpdatedAt]
-      FROM dbo.CheckApproval
+      FROM dbo.Quarter_Applications
       ORDER BY [Id] DESC
     `);
     
