@@ -15,7 +15,7 @@ router.use(requireRole("admin","employee"));
 router.get("/applications", async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(
-    "SELECT a.Id, a.Status, a.Notes, a.CreatedAt, a.UpdatedAt, u.Username, u.Role, q.QuarterNo, q.QuarterType, q.Location FROM dbo.Applications a JOIN dbo.Users u ON u.Id=a.UserId LEFT JOIN dbo.Quarters q ON q.Id=a.QuarterId ORDER BY a.Id DESC"
+    "SELECT a.Id, a.Status, a.Notes, a.CreatedAt, a.UpdatedAt, u.Username, u.Role, q.QuarterNo, q.QuarterType, q.Location FROM Quarter_Applications a JOIN dbo.Users u ON u.Id=a.UserId LEFT JOIN dbo.Quarters q ON q.Id=a.QuarterId ORDER BY a.Id DESC"
   );
   return res.json({ items: result.recordset });
 });
@@ -258,7 +258,7 @@ router.patch("/applications/:id", async (req, res) => {
     .input("Status", sql.NVarChar(24), status)
     .input("Notes", sql.NVarChar(400), notes ?? null)
     .query(
-      "UPDATE dbo.Applications SET Status=@Status, Notes=COALESCE(@Notes, Notes), UpdatedAt=SYSUTCDATETIME() WHERE Id=@Id; SELECT @@ROWCOUNT AS Affected"
+      "UPDATE Quarter_Applications SET Status=@Status, Notes=COALESCE(@Notes, Notes), UpdatedAt=SYSUTCDATETIME() WHERE Id=@Id; SELECT @@ROWCOUNT AS Affected"
     );
 
   const affected = result.recordset[0]?.Affected ?? 0;

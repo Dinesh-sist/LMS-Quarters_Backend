@@ -1,4 +1,4 @@
-IF OBJECT_ID('dbo.Applications', 'U') IS NOT NULL DROP TABLE dbo.Applications;
+IF OBJECT_ID('Quarter_Applications', 'U') IS NOT NULL DROP TABLE Quarter_Applications;
 IF OBJECT_ID('dbo.Quarters', 'U') IS NOT NULL DROP TABLE dbo.Quarters;
 IF OBJECT_ID('dbo.Users', 'U') IS NOT NULL DROP TABLE dbo.Users;
 
@@ -19,7 +19,7 @@ CREATE TABLE dbo.Quarters (
   CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
 );
 
-CREATE TABLE dbo.Applications (
+CREATE TABLE Quarter_Applications (
   Id INT IDENTITY(1,1) PRIMARY KEY,
   UserId INT NOT NULL,
   QuarterId INT NULL,
