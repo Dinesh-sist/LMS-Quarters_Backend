@@ -51,7 +51,144 @@ router.get("/verify-quarter-applications", async (req, res) => {
   return res.json({ items: result.recordset });
 });
 
+router.get("/check-approval", async (req, res) => {
+  try {
+    const userId = Number(req.user.sub);
+    const pool = await getPool();
 
+    const result = await pool
+      .request()
+      .input("UserId", sql.Int, userId)
+      .query(`
+        SELECT
+          [Id],
+          [AppNo],
+          [PriorityNo]                          AS Priority,
+          [UserId],
+          [EmpId],
+          [EmpName],
+          [Class],
+          [Caste]                               AS cast,
+          [AllotCatId],
+          [EmailId],
+          CONVERT(varchar(10), [ReqDate], 23)   AS reqdate,
+          [QtrRequested],
+          [QtrLocation],
+          [QtrType]                             AS Qtrtype,
+          [Reason],
+          [ExchangeReason],
+          [AttachmentPath],
+          [Status],
+          [CreatedAt],
+          [UpdatedAt]
+        FROM dbo.Quarter_Applications
+        WHERE [UserId] = @UserId
+        ORDER BY [Id] DESC
+      `);
+
+    return res.json({ items: result.recordset });
+
+  } catch (err) {
+    console.error("Error fetching check-approval:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/admin/check-approval 
+router.post("/checkapprovalsave", async (req, res) => {
+  try {
+    const userId = Number(req.user.sub);
+    const {
+      quarterId,
+      reason         = null,
+      exchangeReason = null,
+    } = req.body;
+
+    if (!quarterId) {
+      return res.status(400).json({ error: "quarterId is required" });
+    }
+
+    const pool = await getPool();
+    const empResult = await pool
+      .request()
+      .input("UserId", sql.Int, userId)
+      .query(`
+        SELECT
+          [EmployeeId]   AS EmpId,
+          [EmployeeName] AS EmpName,
+          [ClassName]    AS Class,
+          [Email]        AS EmailId,
+          [DateOfBirth]  AS DOB,
+          [DateOfJoining] AS DOJ
+        FROM dbo.UserDetails
+        WHERE UserId = @UserId
+      `);
+    
+    const emp = empResult.recordset[0];
+    if (!emp) {
+      console.error(`Employee not found for UserId: ${userId}`);
+      return res.status(404).json({ error: "Employee record not found. Please contact administrator." });
+    }
+
+  
+    const qtrResult = await pool
+      .request()
+      .input("QuarterId", sql.Int, parseInt(quarterId))
+      .query(`
+        SELECT
+          CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QuarterNo,
+          CAST(CATEGORY         AS NVARCHAR(64)) AS QuarterType,
+          CAST(AREA_TYPE        AS NVARCHAR(64)) AS Location
+        FROM [LMSQuarters].[dbo].[Estate_Quarters]
+        WHERE OBJECTID = @QuarterId
+      `);
+    const qtr = qtrResult.recordset[0] || {};
+
+    
+    const appNo = "APP-" + Date.now();
+
+    const result = await pool
+      .request()
+      .input("AppNo",          sql.NVarChar(50),  appNo)
+      .input("UserId",         sql.Int,           userId)
+      .input("EmpId",          sql.NVarChar(100), emp.EmpId) 
+      .input("EmpName",        sql.NVarChar(200), emp.EmpName)
+      .input("Class",          sql.NVarChar(100), emp.Class)
+      .input("Caste",          sql.NVarChar(100), null)  
+      .input("AllotCatId",     sql.Int,           null)  
+      .input("EmailId",        sql.NVarChar(200), emp.EmailId)
+      .input("QtrRequested",   sql.NVarChar(64),  qtr.QuarterNo   || null)
+      .input("QtrLocation",    sql.NVarChar(64),  qtr.Location    || null)
+      .input("QtrType",        sql.NVarChar(64),  qtr.QuarterType || null)
+      .input("Reason",         sql.NVarChar(100), reason)
+      .input("ExchangeReason", sql.NVarChar(400), exchangeReason)
+      .query(`
+        INSERT INTO dbo.Quarter_Applications (
+          AppNo, UserId, EmpId, EmpName, Class, Caste,
+          AllotCatId, EmailId, ReqDate, QtrRequested,
+          QtrLocation, QtrType, Reason, ExchangeReason,
+          Status, CreatedAt, UpdatedAt
+        )
+        OUTPUT INSERTED.Id, INSERTED.AppNo
+        VALUES (
+          @AppNo, @UserId, @EmpId, @EmpName, @Class, @Caste,
+          @AllotCatId, @EmailId, GETDATE(), @QtrRequested,
+          @QtrLocation, @QtrType, @Reason, @ExchangeReason,
+          'pending', GETDATE(), GETDATE()
+        )
+      `);
+
+    const inserted = result.recordset[0];
+    return res.status(201).json({
+      id:    inserted?.Id,
+      appNo: inserted?.AppNo,
+    });
+
+  } catch (err) {
+    console.error("Error saving application:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 router.get("/status-of-applications", async (req, res) => {
   const pool = await getPool();
@@ -130,15 +267,3 @@ router.patch("/applications/:id", async (req, res) => {
 });
 
 module.exports = router;
-
-
-
-
-
-
-
-
-
-
-
-
