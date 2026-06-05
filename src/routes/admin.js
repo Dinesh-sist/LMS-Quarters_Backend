@@ -9,7 +9,7 @@ const router = express.Router();
 
 
 router.use(requireAuth);
-router.use(requireRole("admin","employee"));
+router.use(requireRole("admin", "employee"));
 
 
 router.get("/applications", async (req, res) => {
@@ -100,7 +100,7 @@ router.post("/checkapprovalsave", async (req, res) => {
     const userId = Number(req.user.sub);
     const {
       quarterId,
-      reason         = null,
+      reason = null,
       exchangeReason = null,
     } = req.body;
 
@@ -123,14 +123,14 @@ router.post("/checkapprovalsave", async (req, res) => {
         FROM dbo.UserDetails
         WHERE UserId = @UserId
       `);
-    
+
     const emp = empResult.recordset[0];
     if (!emp) {
       console.error(`Employee not found for UserId: ${userId}`);
       return res.status(404).json({ error: "Employee record not found. Please contact administrator." });
     }
 
-  
+
     const qtrResult = await pool
       .request()
       .input("QuarterId", sql.Int, parseInt(quarterId))
@@ -144,23 +144,23 @@ router.post("/checkapprovalsave", async (req, res) => {
       `);
     const qtr = qtrResult.recordset[0] || {};
 
-    
+
     const appNo = "APP-" + Date.now();
 
     const result = await pool
       .request()
-      .input("AppNo",          sql.NVarChar(50),  appNo)
-      .input("UserId",         sql.Int,           userId)
-      .input("EmpId",          sql.NVarChar(100), emp.EmpId) 
-      .input("EmpName",        sql.NVarChar(200), emp.EmpName)
-      .input("Class",          sql.NVarChar(100), emp.Class)
-      .input("Caste",          sql.NVarChar(100), null)  
-      .input("AllotCatId",     sql.Int,           null)  
-      .input("EmailId",        sql.NVarChar(200), emp.EmailId)
-      .input("QtrRequested",   sql.NVarChar(64),  qtr.QuarterNo   || null)
-      .input("QtrLocation",    sql.NVarChar(64),  qtr.Location    || null)
-      .input("QtrType",        sql.NVarChar(64),  qtr.QuarterType || null)
-      .input("Reason",         sql.NVarChar(100), reason)
+      .input("AppNo", sql.NVarChar(50), appNo)
+      .input("UserId", sql.Int, userId)
+      .input("EmpId", sql.NVarChar(100), emp.EmpId)
+      .input("EmpName", sql.NVarChar(200), emp.EmpName)
+      .input("Class", sql.NVarChar(100), emp.Class)
+      .input("Caste", sql.NVarChar(100), null)
+      .input("AllotCatId", sql.Int, null)
+      .input("EmailId", sql.NVarChar(200), emp.EmailId)
+      .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
+      .input("QtrLocation", sql.NVarChar(64), qtr.Location || null)
+      .input("QtrType", sql.NVarChar(64), qtr.QuarterType || null)
+      .input("Reason", sql.NVarChar(100), reason)
       .input("ExchangeReason", sql.NVarChar(400), exchangeReason)
       .query(`
         INSERT INTO dbo.Quarter_Applications (
@@ -180,7 +180,7 @@ router.post("/checkapprovalsave", async (req, res) => {
 
     const inserted = result.recordset[0];
     return res.status(201).json({
-      id:    inserted?.Id,
+      id: inserted?.Id,
       appNo: inserted?.AppNo,
     });
 
@@ -221,17 +221,122 @@ router.get("/status-of-applications", async (req, res) => {
   return res.json({ items: result.recordset });
 });
 
-router.get("/house-allotment-committee-history", async (req, res) => {
-  const pool = await getPool();
-  const result = await pool.request().query(`
-    SELECT
-      id,
-      CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
-      remarks
-    FROM dbo.HistoryofAllotment
-    ORDER BY committeeHeld DESC
-  `);
-  return res.json({ items: result.recordset });
+// router.get("/house-allotment-committee-history", async (req, res) => {
+//   const pool = await getPool();
+//   const result = await pool.request().query(`
+//     SELECT
+//       id,
+//       CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
+//       remarks
+//     FROM dbo.HistoryofAllotment
+//     ORDER BY committeeHeld DESC
+//   `);
+//   return res.json({ items: result.recordset });
+// });
+router.post("/publish", async (req, res) => {
+  try {
+    const { fromDate, toDate } = req.body;
+
+    // Validate required fields
+    if (!fromDate || !toDate) {
+      return res.status(400).json({
+        error: "Both From Date and To Date are required."
+      });
+    }
+
+    // Normalize dates
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const from = new Date(fromDate);
+    from.setHours(0, 0, 0, 0);
+
+    const to = new Date(toDate);
+    to.setHours(0, 0, 0, 0);
+
+    // Validation: From Date cannot be in the past
+    if (from < today) {
+      return res.status(400).json({
+        error: "From Date cannot be earlier than today's date."
+      });
+    }
+
+    // Validation: To Date must be after From Date
+    if (to <= from) {
+      return res.status(400).json({
+        error: "To Date must be later than From Date."
+      });
+    }
+
+    const pool = await getPool();
+
+    // Check if a publication is already active
+    const existingPublication = await pool.request().query(`
+      SELECT TOP 1 PublishID
+      FROM dbo.Publish
+      WHERE Current_State = 'Published'
+    `);
+
+    if (existingPublication.recordset.length > 0) {
+      return res.status(400).json({
+        error: "A publication is already active. Stop the current publication before creating a new one."
+      });
+    }
+
+    // Create new publication
+    await pool.request()
+      .input("fromDate", sql.Date, fromDate)
+      .input("toDate", sql.Date, toDate)
+      .query(`
+        INSERT INTO dbo.Publish
+        (
+          From_Date,
+          To_Date,
+          Current_State
+        )
+        VALUES
+        (
+          @fromDate,
+          @toDate,
+          'Published'
+        )
+      `);
+
+    return res.json({
+      success: true,
+      message: "Publication created successfully."
+    });
+
+  } catch (err) {
+    console.error("Publish Error:", err);
+
+    return res.status(500).json({
+      error: "Failed to publish"
+    });
+  }
+});
+router.get("/publication/latest", async (req, res) => {
+  try {
+    const pool = await getPool();
+
+    const result = await pool.request().query(`
+      SELECT TOP 1
+        PublishID,
+        From_Date,
+        To_Date,
+        Current_State
+      FROM dbo.Publish
+      ORDER BY PublishID DESC
+    `);
+
+    res.json(result.recordset[0] || null);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to load publication"
+    });
+  }
 });
 
 const UpdateStatusSchema = z.object({
@@ -239,7 +344,91 @@ const UpdateStatusSchema = z.object({
   notes: z.string().max(400).optional()
 });
 
+router.post("/stop-publication", async (req, res) => {
+  try {
+    const pool = await getPool();
 
+    await pool.request().query(`
+      UPDATE dbo.Publish
+      SET Current_State = 'Closed'
+      WHERE PublishID = (
+        SELECT TOP 1 PublishID
+        FROM dbo.Publish
+        ORDER BY PublishID DESC
+      )
+    `);
+
+    res.json({
+      success: true,
+      message: "Publication stopped successfully"
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to stop publication"
+    });
+  }
+});
+router.put("/publication/update", async (req, res) => {
+  try {
+    const { toDate } = req.body;
+
+    if (!toDate) {
+      return res.status(400).json({
+        error: "To Date is required."
+      });
+    }
+
+    const pool = await getPool();
+
+    const currentPublication = await pool.request().query(`
+      SELECT TOP 1 *
+      FROM dbo.Publish
+      WHERE Current_State = 'Published'
+      ORDER BY PublishID DESC
+    `);
+
+    if (currentPublication.recordset.length === 0) {
+      return res.status(404).json({
+        error: "No active publication found."
+      });
+    }
+
+    const publication = currentPublication.recordset[0];
+
+    const fromDate = new Date(publication.From_Date);
+    const newToDate = new Date(toDate);
+
+    fromDate.setHours(0, 0, 0, 0);
+    newToDate.setHours(0, 0, 0, 0);
+
+    if (newToDate <= fromDate) {
+      return res.status(400).json({
+        error: "To Date must be later than From Date."
+      });
+    }
+
+    await pool.request()
+      .input("ToDate", sql.Date, toDate)
+      .input("PublishID", sql.Int, publication.PublishID)
+      .query(`
+        UPDATE dbo.Publish
+        SET To_Date = @ToDate
+        WHERE PublishID = @PublishID
+      `);
+
+    res.json({
+      success: true
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Failed to update publication"
+    });
+  }
+});
 router.patch("/applications/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
