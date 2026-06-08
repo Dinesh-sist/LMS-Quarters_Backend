@@ -53,4 +53,46 @@ router.get("/vacant", requireAuth, async (req, res) => {
   }
 });
 
+router.get("/total-count", requireAuth, async (req, res) => {
+  try {
+    const pool = await getPool();
+
+    const result = await pool.request().query(`
+  SELECT COUNT(*) AS total
+  FROM [LMSQuarters].[dbo].[Estate_Quarters]
+  WHERE NULLIF(LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(MAX)))), '') IS NOT NULL
+`);
+
+    return res.json({
+      total: result.recordset[0]?.total || 0,
+    });
+  } catch (err) {
+    console.error("Error fetching total quarters count:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+router.get("/status-counts", requireAuth, async (req, res) => {
+  try {
+    const pool = await getPool();
+
+    const result = await pool.request().query(`
+      SELECT
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(CAST([STATUS1] AS NVARCHAR(100))))) = 'OCCUPIED' THEN 1 ELSE 0 END) AS occupied,
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(CAST([STATUS1] AS NVARCHAR(100))))) = 'VACANT' THEN 1 ELSE 0 END) AS vacant,
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(CAST([STATUS1] AS NVARCHAR(100))))) = 'BEYOND REPAIR' THEN 1 ELSE 0 END) AS beyondRepair
+      FROM [LMSQuarters].[dbo].[Estate_Quarters]
+    `);
+
+    const row = result.recordset[0] || {};
+
+    return res.json({
+      occupied: row.occupied || 0,
+      vacant: row.vacant || 0,
+      beyondRepair: row.beyondRepair || 0,
+    });
+  } catch (err) {
+    console.error("Error fetching quarter status counts:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
 module.exports = router;
