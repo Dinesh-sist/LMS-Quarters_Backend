@@ -30,7 +30,6 @@ router.post("/", requireAuth, async (req, res) => {
       "INSERT INTO dbo.Applications (UserId, QuarterId, Status, Notes) OUTPUT INSERTED.Id VALUES (@UserId, @QuarterId, 'pending', @Notes)"
     );
 
-    
   return res.status(201).json({ id: result.recordset[0]?.Id });
 });
 
@@ -47,3 +46,7 @@ router.get("/me", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
