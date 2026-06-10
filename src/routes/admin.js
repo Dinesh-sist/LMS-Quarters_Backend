@@ -109,6 +109,44 @@ router.post("/checkapprovalsave", async (req, res) => {
     }
 
     const pool = await getPool();
+    const publicationResult = await pool.request().query(`
+  SELECT TOP 1
+    PublishID,
+    From_Date,
+    To_Date,
+    Current_State
+  FROM dbo.Publish
+  ORDER BY PublishID DESC
+`);
+
+    const publication = publicationResult.recordset[0];
+
+    if (!publication) {
+      return res.status(400).json({
+        error: "Application portal is currently closed."
+      });
+    }
+
+    if (publication.Current_State !== "Published") {
+      return res.status(400).json({
+        error: "Application portal is currently closed."
+      });
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const fromDate = new Date(publication.From_Date);
+    const toDate = new Date(publication.To_Date);
+
+    fromDate.setHours(0, 0, 0, 0);
+    toDate.setHours(0, 0, 0, 0);
+
+    if (today < fromDate || today > toDate) {
+      return res.status(400).json({
+        error: "Application period has ended."
+      });
+    }
     const empResult = await pool
       .request()
       .input("UserId", sql.Int, userId)
