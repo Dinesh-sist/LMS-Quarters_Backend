@@ -15,3 +15,6 @@ API runs on `http://localhost:5000` by default.
 - This is a minimal starter backend: JWT auth + quarters/applications endpoints.
 - Update role logic / UI integration as you wire up the frontend.
 
+
+
+

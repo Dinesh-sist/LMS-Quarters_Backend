@@ -10,7 +10,7 @@ const envBool = (key, fallback) => {
 };
 
 // ✅ define it as a variable FIRST
-const allowedOrigins = env("ALLOWED_ORIGINS", "http://localhost:5174")
+const allowedOrigins = env("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);

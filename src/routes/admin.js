@@ -1,10 +1,42 @@
 const express = require("express");
+const path = require("path");
+const fs = require("fs");
+const multer = require("multer");
 const { z } = require("zod");
 const { getPool, sql } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 
 
 const router = express.Router();
+
+// ── File upload (multer) setup ───────────────────────────────────────────────
+const UPLOADS_DIR = path.join(__dirname, "..", "..", "uploads");
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+  filename: (_req, file, cb) => {
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+    const ext = path.extname(file.originalname);
+    cb(null, `${unique}${ext}`);
+  },
+});
+
+
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  fileFilter: (_req, file, cb) => {
+    // Allow common document & image types
+    const allowed = [".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png", ".gif"];
+    if (allowed.includes(path.extname(file.originalname).toLowerCase())) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only PDF, Word and image files are allowed"));
+    }
+  },
+});
 
 
 
@@ -22,33 +54,39 @@ router.get("/applications", async (req, res) => {
 
 
 router.get("/verify-quarter-applications", async (req, res) => {
-  const pool = await getPool();
-  const result = await pool.request().query(`
-    SELECT
-      id,
-      appNo,
-      empId,
-      empName,
-      [class],
-      CONVERT(varchar(10), gradDate, 23) AS gradDate,
-      CONVERT(varchar(10), dateOfJoin, 23) AS dateOfJoin,
-      basic,
-      CONVERT(varchar(10), dob, 23) AS dob,
-      dept,
-      casteID,
-      currentQtr,
-      currentQtrType,
-      requestedQtr,
-      requestedQtrLocation,
-      requestedQtrType,
-      exchangeQtr,
-      proofFile,
-      CONVERT(varchar(10), requestedDate, 23) AS requestedDate,
-      stage
-    FROM dbo.VerifyQuarterApplications
-    ORDER BY appNo DESC
-  `);
-  return res.json({ items: result.recordset });
+  try {
+    const pool = await getPool();
+    const result = await pool.request().query(`
+      SELECT
+        qa.[Id],
+        qa.[AppNo],
+        qa.[UserId],
+        qa.[EmpId],
+        qa.[EmpName],
+        qa.[Class],
+        qa.[Caste],
+        qa.[EmailId],
+        CONVERT(varchar(10), qa.[ReqDate], 23)    AS ReqDate,
+        qa.[QtrRequested],
+        qa.[QtrLocation],
+        qa.[QtrType],
+        qa.[Reason],
+        qa.[ExchangeReason],
+        qa.[AttachmentPath],
+        qa.[Status],
+        CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
+        CONVERT(varchar(10), ud.GradDate, 23) AS GradDate,
+        CONVERT(varchar(19), qa.[CreatedAt], 120)  AS CreatedAt,
+        CONVERT(varchar(19), qa.[UpdatedAt], 120)  AS UpdatedAt
+      FROM dbo.Quarter_Applications qa
+      LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+      ORDER BY qa.[Id] DESC
+    `);
+    return res.json({ items: result.recordset });
+  } catch (err) {
+    console.error("verify-quarter-applications error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 router.get("/check-approval", async (req, res) => {
@@ -61,29 +99,31 @@ router.get("/check-approval", async (req, res) => {
       .input("UserId", sql.Int, userId)
       .query(`
         SELECT
-          [Id],
-          [AppNo],
-          [PriorityNo]                          AS Priority,
-          [UserId],
-          [EmpId],
-          [EmpName],
-          [Class],
-          [Caste]                               AS cast,
-          [AllotCatId],
-          [EmailId],
-          CONVERT(varchar(10), [ReqDate], 23)   AS reqdate,
-          [QtrRequested],
-          [QtrLocation],
-          [QtrType]                             AS Qtrtype,
-          [Reason],
-          [ExchangeReason],
-          [AttachmentPath],
-          [Status],
-          [CreatedAt],
-          [UpdatedAt]
-        FROM dbo.Quarter_Applications
-        WHERE [UserId] = @UserId
-        ORDER BY [Id] DESC
+          qa.[Id],
+          qa.[AppNo],
+          qa.[PriorityNo],
+          qa.[UserId],
+          qa.[EmpId],
+          qa.[EmpName],
+          qa.[Class],
+          qa.[Caste],
+          qa.[AllotCatId],
+          qa.[EmailId],
+          CONVERT(varchar(10), qa.[ReqDate], 23)   AS ReqDate,
+          qa.[QtrRequested],
+          qa.[QtrLocation],
+          qa.[QtrType],
+          qa.[Reason],
+          qa.[ExchangeReason],
+          qa.[AttachmentPath],
+          qa.[Status],
+          CONVERT(varchar(10), ud.GradDate, 23) AS GradDate,
+          qa.[CreatedAt],
+          qa.[UpdatedAt]
+        FROM dbo.Quarter_Applications qa
+        LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+        WHERE qa.[UserId] = @UserId
+        ORDER BY qa.[Id] DESC
       `);
 
     return res.json({ items: result.recordset });
@@ -94,7 +134,42 @@ router.get("/check-approval", async (req, res) => {
   }
 });
 
-// POST /api/admin/check-approval 
+// POST /api/admin/upload-attachment/:id  — attach a file to an existing application
+router.post("/upload-attachment/:id", upload.single("attachment"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0)
+      return res.status(400).json({ error: "Invalid application ID" });
+
+    if (!req.file)
+      return res.status(400).json({ error: "No file uploaded" });
+
+    // Store just the filename so it can be served via /uploads/<filename>
+    const attachmentPath = req.file.filename;
+
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("Id", sql.Int, id)
+      .input("AttachmentPath", sql.NVarChar(500), attachmentPath)
+      .query(`
+        UPDATE dbo.Quarter_Applications
+        SET AttachmentPath = @AttachmentPath, UpdatedAt = GETDATE()
+        WHERE Id = @Id;
+        SELECT @@ROWCOUNT AS Affected
+      `);
+
+    const affected = result.recordset[0]?.Affected ?? 0;
+    if (!affected) return res.status(404).json({ error: "Application not found" });
+
+    return res.json({ ok: true, filename: attachmentPath });
+  } catch (err) {
+    console.error("Upload attachment error:", err);
+    return res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
+// POST /api/admin/check-approval
 router.post("/checkapprovalsave", async (req, res) => {
   try {
     const userId = Number(req.user.sub);
@@ -157,7 +232,8 @@ router.post("/checkapprovalsave", async (req, res) => {
           [ClassName]    AS Class,
           [Email]        AS EmailId,
           [DateOfBirth]  AS DOB,
-          [DateOfJoining] AS DOJ
+          [DateOfJoining] AS DOJ,
+          [Caste]
         FROM dbo.UserDetails
         WHERE UserId = @UserId
       `);
@@ -168,6 +244,9 @@ router.post("/checkapprovalsave", async (req, res) => {
       return res.status(404).json({ error: "Employee record not found. Please contact administrator." });
     }
 
+    // ── Resolve caste from UserDetails directly ──────────────────────────────────
+    let casteValue = emp.Caste || "GENERAL";
+    // ────────────────────────────────────────────────────────────────────────
 
     const qtrResult = await pool
       .request()
@@ -192,7 +271,7 @@ router.post("/checkapprovalsave", async (req, res) => {
       .input("EmpId", sql.NVarChar(100), emp.EmpId)
       .input("EmpName", sql.NVarChar(200), emp.EmpName)
       .input("Class", sql.NVarChar(100), emp.Class)
-      .input("Caste", sql.NVarChar(100), null)
+      .input("Caste", sql.NVarChar(100), casteValue)
       .input("AllotCatId", sql.Int, null)
       .input("EmailId", sql.NVarChar(200), emp.EmailId)
       .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
@@ -232,29 +311,36 @@ router.get("/status-of-applications", async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(`
     SELECT
-      id,
-      appNo,
-      empId,
-      empName,
-      [class],
-      CONVERT(varchar(10), gradDate, 23) AS gradDate,
-      CONVERT(varchar(10), dateOfJoin, 23) AS dateOfJoin,
-      basic,
-      CONVERT(varchar(10), dob, 23) AS dob,
-      dept,
-      casteId,
-      currentQtr,
-      currentQtyType,
-      reqQtr,
-      reqQtrLocation,
-      reqQtrType,
-      exchange,
-      proofFile,
-      CONVERT(varchar(10), reqDate, 23) AS reqDate,
-      rosterNo,
-      result
-    FROM dbo.StatusOfApplications
-    ORDER BY appNo DESC
+      qa.[Id] AS id,
+      qa.[AppNo] AS appNo,
+      qa.[EmpId] AS empId,
+      qa.[EmpName] AS empName,
+      qa.[Class] AS class,
+      CONVERT(varchar(10), ud.GradDate, 23) AS gradDate,
+      CONVERT(varchar(10), ud.DateOfJoining, 23) AS dateOfJoin,
+      '' AS basic,
+      CONVERT(varchar(10), ud.DateOfBirth, 23) AS dob,
+      '' AS dept,
+      qa.[Caste] AS casteId,
+      '' AS currentQtr,
+      (
+        SELECT TOP 1 qa2.[QtrType]
+        FROM dbo.Quarter_Applications qa2
+        WHERE qa2.[UserId] = qa.[UserId]
+          AND LOWER(qa2.[Status]) = 'approved'
+        ORDER BY qa2.[Id] DESC
+      ) AS currentQtyType,
+      qa.[QtrRequested] AS reqQtr,
+      qa.[QtrLocation] AS reqQtrLocation,
+      qa.[QtrType] AS reqQtrType,
+      qa.[ExchangeReason] AS exchange,
+      qa.[AttachmentPath] AS proofFile,
+      CONVERT(varchar(10), qa.[ReqDate], 23) AS reqDate,
+      '' AS rosterNo,
+      qa.[Status] AS result
+    FROM dbo.Quarter_Applications qa
+    LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+    ORDER BY qa.[Id] DESC
   `);
   return res.json({ items: result.recordset });
 });
@@ -475,17 +561,15 @@ router.patch("/applications/:id", async (req, res) => {
   const parsed = UpdateStatusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
 
-  const { status, notes } = parsed.data;
+  const { status } = parsed.data;
   const pool = await getPool();
-
 
   const result = await pool
     .request()
     .input("Id", sql.Int, id)
     .input("Status", sql.NVarChar(24), status)
-    .input("Notes", sql.NVarChar(400), notes ?? null)
     .query(
-      "UPDATE Quarter_Applications SET Status=@Status, Notes=COALESCE(@Notes, Notes), UpdatedAt=SYSUTCDATETIME() WHERE Id=@Id; SELECT @@ROWCOUNT AS Affected"
+      "UPDATE Quarter_Applications SET Status=@Status, UpdatedAt=SYSUTCDATETIME() WHERE Id=@Id; SELECT @@ROWCOUNT AS Affected"
     );
 
   const affected = result.recordset[0]?.Affected ?? 0;

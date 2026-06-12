@@ -154,80 +154,65 @@ router.get("/me", requireAuth, async (req, res) => {
     .request()
     .input("UserId", sql.Int, userId)
     .query(
-      "SELECT TOP 1 EmployeeId, DateOfBirth, EmployeeName FROM dbo.UserDetails WHERE UserId=@UserId"
+      "SELECT EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, GradDate, ClassName, ClassChoice, Mobile, Email FROM dbo.UserDetails WHERE UserId=@UserId"
     );
 
   const row = details.recordset?.[0];
   if (!row) return res.status(404).json({ error: "User details not found" });
 
-  const employeeId = String(row.EmployeeId || "").trim();
-  const dob = row.DateOfBirth
-    ? new Date(row.DateOfBirth).toISOString().slice(0, 10)
-    : "";
+  const className = String(row.ClassName || row.ClassChoice || "").trim();
+  const classLookup = await pool
+    .request()
+    .input("ClassName", sql.NVarChar(60), `%${className}%`)
+    .query(
+      "SELECT TOP 1 Class_ID FROM dbo.Quarter_Emp_Class WHERE UPPER(Class) LIKE UPPER(@ClassName) OR UPPER(class_name) LIKE UPPER(@ClassName) ORDER BY Class_PRIORITY ASC"
+    );
+  const classId = classLookup.recordset?.[0]?.Class_ID ?? null;
 
-  if (!employeeId || !dob)
-    return res.status(400).json({ error: "Missing employee details" });
+  // Try to find Type and Caste from legacy tables if they exist
+  let type = "";
+  let casteOfEmployee = "GENERAL";
 
-  console.log("Searching for employee:", { employeeId, dob }); 
+  const dobForLookup = row.DateOfBirth;
+  const empIdForLookup = row.EmployeeId;
 
-  const tables = ["Class1", "Class2", "Class3", "Class4"];
-  let found = null;
-
-  for (const table of tables) {
-    try {
-      const { hasType, hasCast } = await getTableColumns(pool, table);
-
-      const typeCol = hasType
-        ? "CAST(Type AS NVARCHAR(100)) AS Type"
-        : "NULL AS Type";
-      const castCol = hasCast
-        ? "CAST([CAST] AS NVARCHAR(100)) AS [CAST]"
-        : "NULL AS [CAST]";
-
-      console.log(`Table ${table} → hasType:${hasType} hasCast:${hasCast}`); // 🔍 debug
-
-      // eslint-disable-next-line no-await-in-loop
-      const r = await pool
-        .request()
-        .input("EmpNo", sql.NVarChar(50), employeeId)
-        .input("Dob", sql.Date, new Date(dob))
-        .query(`SELECT TOP 1 EMP_NO, EMP_NM, BIRTH_DT, JOIN_DT, ${typeCol}, ${castCol}
-                FROM dbo.${table}
-                WHERE EMP_NO=@EmpNo AND BIRTH_DT=@Dob`);
-
-      if (r.recordset?.[0]) {
-        found = { table, row: r.recordset[0] };
-        console.log(`Found in table: ${table}`); // 🔍 debug
-        break;
+  if (empIdForLookup && dobForLookup) {
+    const tables = ["Class1", "Class2", "Class3", "Class4"];
+    for (const table of tables) {
+      try {
+        const found = await tryFindInTable(pool, table, empIdForLookup, dobForLookup);
+        if (found && found.row) {
+          type = found.row.Type ?? "";
+          const castRaw = found.row.CAST == null ? "" : String(found.row.CAST).trim().toUpperCase();
+          casteOfEmployee = castRaw === "SC" ? "SC" : castRaw === "ST" ? "ST" : "GENERAL";
+          break;
+        }
+      } catch (err) {
+        console.warn(`Skipping table ${table} for caste lookup:`, err.message);
       }
-    } catch (err) {
-      console.warn(`Skipping table ${table}:`, err.message);
     }
   }
 
-  if (!found) return res.status(404).json({ error: "Employee not found" });
+  // Format dates for the JSON response safely
+  const formatDOB = row.DateOfBirth ? 
+    `${row.DateOfBirth.getFullYear()}-${String(row.DateOfBirth.getMonth() + 1).padStart(2, '0')}-${String(row.DateOfBirth.getDate()).padStart(2, '0')}` : "";
+  
+  const formatDOJ = row.DateOfJoining ? 
+    `${row.DateOfJoining.getFullYear()}-${String(row.DateOfJoining.getMonth() + 1).padStart(2, '0')}-${String(row.DateOfJoining.getDate()).padStart(2, '0')}` : "";
 
-  const classNo = classFromTableName(found.table);
-  const empClass = classNo
-    ? await findQuarterEmpClass(pool, { classNo, type: found.row?.Type })
-    : null;
-
-  const castRaw =
-    found.row?.CAST == null ? "" : String(found.row.CAST).trim().toUpperCase();
-  const casteOfEmployee =
-    castRaw === "SC" ? "SC" : castRaw === "ST" ? "ST" : "GENERAL";
+  const formatGradDate = row.GradDate ? 
+    `${row.GradDate.getFullYear()}-${String(row.GradDate.getMonth() + 1).padStart(2, '0')}-${String(row.GradDate.getDate()).padStart(2, '0')}` : "";
 
   return res.json({
-    employeeId: found.row.EMP_NO,
-    employeeName: row.EmployeeName || found.row.EMP_NM || "",
-    dateOfBirth: new Date(found.row.BIRTH_DT).toISOString().slice(0, 10),
-    dateOfJoining: found.row.JOIN_DT
-      ? new Date(found.row.JOIN_DT).toISOString().slice(0, 10)
-      : "",
-    type: found.row?.Type ?? "",
-    classOfEmployee: empClass?.Class || "",
-    casteOfEmployee,
-    classId: empClass?.Class_ID ?? null,
+    employeeId: row.EmployeeId || "",
+    employeeName: row.EmployeeName || "",
+    dateOfBirth: formatDOB,
+    dateOfJoining: formatDOJ,
+    gradDate: formatGradDate,
+    type: type, 
+    classOfEmployee: row.ClassName || row.ClassChoice || "",
+    casteOfEmployee: casteOfEmployee, 
+    classId: classId,
   });
 });
 
