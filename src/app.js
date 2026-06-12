@@ -1,4 +1,6 @@
 const express = require("express");
+const path = require("path");
+const fs = require("fs");
 const cors = require("cors");
 const helmet = require("helmet");
 const { allowedOrigins } = require("./config");
@@ -33,6 +35,11 @@ function createApp() {
 
   app.get("/", (req, res) => res.json({ name: "lms-quarters-backend" }));
   app.use("/health", health);
+
+  // Serve uploaded attachment files
+  const uploadsDir = path.join(__dirname, "..", "uploads");
+  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+  app.use("/uploads", express.static(uploadsDir));
 
   app.use("/api/auth", auth);
   app.use("/api/quarters", quarters);
