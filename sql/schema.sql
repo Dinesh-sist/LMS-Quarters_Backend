@@ -25,10 +25,20 @@ CREATE TABLE Quarter_Applications (
   QuarterId INT NULL,
   Status NVARCHAR(24) NOT NULL DEFAULT 'pending', -- 'pending' | 'approved' | 'rejected' | 'cancelled'
   Notes NVARCHAR(400) NULL,
+  PublishedDateFrom DATE NULL,
+  PublishedDateTo DATE NULL,
+  RosterNo INT NULL,
   CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
   UpdatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
   CONSTRAINT FK_Applications_Users FOREIGN KEY (UserId) REFERENCES dbo.Users(Id),
   CONSTRAINT FK_Applications_Quarters FOREIGN KEY (QuarterId) REFERENCES dbo.Quarters(Id)
+);
+
+CREATE TABLE dbo.HistoryofAllotment (
+  Id INT IDENTITY(1,1) PRIMARY KEY,
+  committeeHeld DATE NOT NULL,
+  downloadLink NVARCHAR(500) NOT NULL,
+  CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
 );
 
 GO

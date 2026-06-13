@@ -22,8 +22,17 @@ router.get("/vacant", requireAuth, async (req, res) => {
             CAST(eq.CATEGORY AS NVARCHAR(64))          AS QuarterType,
             CAST(eq.AREA_TYPE AS NVARCHAR(64))         AS Location,
             CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))  AS QuarterNo,
+            (COALESCE(app.ApplicationCount, 0) % 60) + 1 AS NextRosterNo,
             'available' AS Status
         FROM [LMSQuarters].[dbo].[Estate_Quarters] eq
+        LEFT JOIN (
+            SELECT
+                CAST(QtrRequested AS NVARCHAR(64)) AS QuarterNo,
+                COUNT(*) AS ApplicationCount
+            FROM dbo.Quarter_Applications
+            GROUP BY CAST(QtrRequested AS NVARCHAR(64))
+        ) app
+            ON app.QuarterNo = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
         WHERE 
             UPPER(LTRIM(RTRIM(CAST(eq.STATUS1 AS NVARCHAR(32))))) = 'VACANT'
             AND CAST(eq.CATEGORY AS NVARCHAR(64)) IN (
@@ -41,6 +50,7 @@ router.get("/vacant", requireAuth, async (req, res) => {
       QuarterType: r.QuarterType,
       Location: r.Location,
       QuarterNo: r.QuarterNo,
+      NextRosterNo: r.NextRosterNo,
       Status: r.Status,
       IsAvailable: true
     }));
