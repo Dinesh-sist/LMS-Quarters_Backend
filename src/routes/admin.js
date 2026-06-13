@@ -38,6 +38,125 @@ const upload = multer({
   },
 });
 
+const committeeUpload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  fileFilter: (_req, file, cb) => {
+    const allowed = [".pdf", ".doc", ".docx"];
+    if (allowed.includes(path.extname(file.originalname).toLowerCase())) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only PDF and Word documents are allowed"));
+    }
+  },
+});
+
+async function ensureQuarterApplicationPublishColumns(pool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.Quarter_Applications', 'PublishedDateFrom') IS NULL
+    BEGIN
+      ALTER TABLE dbo.Quarter_Applications
+      ADD PublishedDateFrom DATE NULL;
+    END;
+
+    IF COL_LENGTH('dbo.Quarter_Applications', 'PublishedDateTo') IS NULL
+    BEGIN
+      ALTER TABLE dbo.Quarter_Applications
+      ADD PublishedDateTo DATE NULL;
+    END;
+  `);
+}
+
+async function ensureQuarterApplicationRosterColumn(pool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.Quarter_Applications', 'RosterNo') IS NULL
+    BEGIN
+      ALTER TABLE dbo.Quarter_Applications
+      ADD RosterNo INT NULL;
+    END;
+  `);
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim();
+}
+
+function isRosterCasteEligible(caste, quarterType, rosterNo) {
+  const casteNorm = normalizeText(caste);
+
+  const quarterNorm = normalizeText(quarterType);
+  const roster = Number(rosterNo);
+  if (!Number.isInteger(roster) || roster < 1 || roster > 60) {
+    return { allowed: false, message: "Invalid roster number." };
+  }
+
+  if (!casteNorm) {
+    return { allowed: false, message: "Employee caste is required to validate roster eligibility." };
+  }
+
+  const aLike = new Set(["A TYPE", "B TYPE", "B TYPE IIIR"]);
+  const cLike = new Set(["C TYPE", "C TYPE MODIFIED", "D TYPE"]);
+
+  if (aLike.has(quarterNorm)) {
+    if ([10, 20, 40, 50].includes(roster)) {
+      return casteNorm === "SC"
+        ? { allowed: true }
+        : { allowed: false, message: "This roster is reserved for SC applicants." };
+    }
+    if ([30, 60].includes(roster)) {
+      return casteNorm === "ST"
+        ? { allowed: true }
+        : { allowed: false, message: "This roster is reserved for ST applicants." };
+    }
+    return { allowed: true };
+  }
+
+  if (cLike.has(quarterNorm)) {
+    if ([20, 40].includes(roster)) {
+      return casteNorm === "SC"
+        ? { allowed: true }
+        : { allowed: false, message: "This roster is reserved for SC applicants." };
+    }
+    if (roster === 60) {
+      return casteNorm === "ST"
+        ? { allowed: true }
+        : { allowed: false, message: "This roster is reserved for ST applicants." };
+    }
+    return { allowed: true };
+  }
+
+  return { allowed: true };
+}
+
+async function ensureHistoryOfAllotmentTable(pool) {
+  await pool.request().query(`
+    IF OBJECT_ID('dbo.HistoryofAllotment', 'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.HistoryofAllotment (
+        Id INT IDENTITY(1,1) PRIMARY KEY,
+        committeeHeld DATE NOT NULL,
+        downloadLink NVARCHAR(500) NOT NULL,
+        CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+      );
+    END;
+
+    IF COL_LENGTH('dbo.HistoryofAllotment', 'committeeHeld') IS NULL
+    BEGIN
+      ALTER TABLE dbo.HistoryofAllotment
+      ADD committeeHeld DATE NULL;
+    END;
+
+    IF COL_LENGTH('dbo.HistoryofAllotment', 'downloadLink') IS NULL
+    BEGIN
+      ALTER TABLE dbo.HistoryofAllotment
+      ADD downloadLink NVARCHAR(500) NULL;
+    END;
+  `);
+}
+
 
 
 router.use(requireAuth);
@@ -47,7 +166,7 @@ router.use(requireRole("admin", "employee"));
 router.get("/applications", async (req, res) => {
   const pool = await getPool();
   const result = await pool.request().query(
-    "SELECT a.Id, a.Status, a.Notes, a.CreatedAt, a.UpdatedAt, u.Username, u.Role, q.QuarterNo, q.QuarterType, q.Location FROM Quarter_Applications a JOIN dbo.Users u ON u.Id=a.UserId LEFT JOIN dbo.Quarters q ON q.Id=a.QuarterId ORDER BY a.Id DESC"
+    "SELECT a.Id, a.Status, a.Notes, a.CreatedAt, a.UpdatedAt, a.PublishedDateFrom, a.PublishedDateTo, u.Username, u.Role, q.QuarterNo, q.QuarterType, q.Location FROM dbo.Quarter_Applications a JOIN dbo.Users u ON u.Id=a.UserId LEFT JOIN dbo.Quarters q ON q.Id=a.QuarterId ORDER BY a.Id DESC"
   );
   return res.json({ items: result.recordset });
 });
@@ -74,6 +193,8 @@ router.get("/verify-quarter-applications", async (req, res) => {
         qa.[ExchangeReason],
         qa.[AttachmentPath],
         qa.[Status],
+        qa.[PublishedDateFrom],
+        qa.[PublishedDateTo],
         CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
         CONVERT(varchar(10), ud.GradDate, 23) AS GradDate,
         CONVERT(varchar(19), qa.[CreatedAt], 120)  AS CreatedAt,
@@ -117,6 +238,8 @@ router.get("/check-approval", async (req, res) => {
           qa.[ExchangeReason],
           qa.[AttachmentPath],
           qa.[Status],
+          qa.[PublishedDateFrom],
+          qa.[PublishedDateTo],
           CONVERT(varchar(10), ud.GradDate, 23) AS GradDate,
           qa.[CreatedAt],
           qa.[UpdatedAt]
@@ -222,6 +345,8 @@ router.post("/checkapprovalsave", async (req, res) => {
         error: "Application period has ended."
       });
     }
+    await ensureQuarterApplicationPublishColumns(pool);
+    await ensureQuarterApplicationRosterColumn(pool);
     const empResult = await pool
       .request()
       .input("UserId", sql.Int, userId)
@@ -264,46 +389,89 @@ router.post("/checkapprovalsave", async (req, res) => {
 
     const appNo = "APP-" + Date.now();
 
-    const result = await pool
-      .request()
-      .input("AppNo", sql.NVarChar(50), appNo)
-      .input("UserId", sql.Int, userId)
-      .input("EmpId", sql.NVarChar(100), emp.EmpId)
-      .input("EmpName", sql.NVarChar(200), emp.EmpName)
-      .input("Class", sql.NVarChar(100), emp.Class)
-      .input("Caste", sql.NVarChar(100), casteValue)
-      .input("AllotCatId", sql.Int, null)
-      .input("EmailId", sql.NVarChar(200), emp.EmailId)
-      .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
-      .input("QtrLocation", sql.NVarChar(64), qtr.Location || null)
-      .input("QtrType", sql.NVarChar(64), qtr.QuarterType || null)
-      .input("Reason", sql.NVarChar(100), reason)
-      .input("ExchangeReason", sql.NVarChar(400), exchangeReason)
-      .query(`
-        INSERT INTO dbo.Quarter_Applications (
-          AppNo, UserId, EmpId, EmpName, Class, Caste,
-          AllotCatId, EmailId, ReqDate, QtrRequested,
-          QtrLocation, QtrType, Reason, ExchangeReason,
-          Status, CreatedAt, UpdatedAt
-        )
-        OUTPUT INSERTED.Id, INSERTED.AppNo
-        VALUES (
-          @AppNo, @UserId, @EmpId, @EmpName, @Class, @Caste,
-          @AllotCatId, @EmailId, GETDATE(), @QtrRequested,
-          @QtrLocation, @QtrType, @Reason, @ExchangeReason,
-          'pending', GETDATE(), GETDATE()
-        )
-      `);
+    const tx = new sql.Transaction(pool);
+    await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
 
-    const inserted = result.recordset[0];
-    return res.status(201).json({
-      id: inserted?.Id,
-      appNo: inserted?.AppNo,
-    });
+    try {
+      const rosterRequest = new sql.Request(tx);
+      const rosterLookup = await rosterRequest
+        .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
+        .query(`
+          DECLARE @RosterNo INT;
 
+          SELECT @RosterNo = (COUNT(*) % 60) + 1
+          FROM dbo.Quarter_Applications WITH (UPDLOCK, HOLDLOCK)
+          WHERE QtrRequested = @QtrRequested;
+
+          SELECT @RosterNo AS RosterNo;
+        `);
+
+      const rosterNo = Number(rosterLookup.recordset[0]?.RosterNo || 1);
+
+      const rosterEligibility = isRosterCasteEligible(casteValue, qtr.QuarterType, rosterNo);
+      if (!rosterEligibility.allowed) {
+        const rosterErr = new Error(rosterEligibility.message || "You cannot apply for this quarter at the current roster number.");
+        rosterErr.statusCode = 400;
+        throw rosterErr;
+      }
+
+      const insertRequest = new sql.Request(tx);
+      const result = await insertRequest
+        .input("AppNo", sql.NVarChar(50), appNo)
+        .input("UserId", sql.Int, userId)
+        .input("EmpId", sql.NVarChar(100), emp.EmpId)
+        .input("EmpName", sql.NVarChar(200), emp.EmpName)
+        .input("Class", sql.NVarChar(100), emp.Class)
+        .input("Caste", sql.NVarChar(100), casteValue)
+        .input("AllotCatId", sql.Int, null)
+        .input("EmailId", sql.NVarChar(200), emp.EmailId)
+        .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
+        .input("QtrLocation", sql.NVarChar(64), qtr.Location || null)
+        .input("QtrType", sql.NVarChar(64), qtr.QuarterType || null)
+        .input("PublishedDateFrom", sql.Date, publication.From_Date)
+        .input("PublishedDateTo", sql.Date, publication.To_Date)
+        .input("RosterNo", sql.Int, rosterNo)
+        .input("Reason", sql.NVarChar(100), reason)
+        .input("ExchangeReason", sql.NVarChar(400), exchangeReason)
+        .query(`
+          INSERT INTO dbo.Quarter_Applications (
+            AppNo, UserId, EmpId, EmpName, Class, Caste,
+            AllotCatId, EmailId, ReqDate, QtrRequested,
+            QtrLocation, QtrType, PublishedDateFrom, PublishedDateTo,
+            RosterNo, Reason, ExchangeReason, Status, CreatedAt, UpdatedAt
+          )
+          OUTPUT INSERTED.Id, INSERTED.AppNo, INSERTED.RosterNo
+          VALUES (
+            @AppNo, @UserId, @EmpId, @EmpName, @Class, @Caste,
+            @AllotCatId, @EmailId, GETDATE(), @QtrRequested,
+            @QtrLocation, @QtrType, @PublishedDateFrom, @PublishedDateTo,
+            @RosterNo, @Reason, @ExchangeReason, 'pending', GETDATE(), GETDATE()
+          )
+        `);
+
+      await tx.commit();
+
+      const inserted = result.recordset[0];
+      return res.status(201).json({
+        id: inserted?.Id,
+        appNo: inserted?.AppNo,
+        rosterNo: inserted?.RosterNo,
+        publishedDateFrom: publication.From_Date,
+        publishedDateTo: publication.To_Date,
+      });
+    } catch (txErr) {
+      try {
+        await tx.rollback();
+      } catch (rollbackErr) {
+        console.error("Rollback error:", rollbackErr);
+      }
+      throw txErr;
+    }
   } catch (err) {
-    console.error("Error saving application:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    const statusCode = err?.statusCode && Number.isInteger(err.statusCode) ? err.statusCode : 500;
+    return res.status(statusCode).json({
+      error: err?.message || "Internal server error",
+    });
   }
 });
 
@@ -333,10 +501,12 @@ router.get("/status-of-applications", async (req, res) => {
       qa.[QtrRequested] AS reqQtr,
       qa.[QtrLocation] AS reqQtrLocation,
       qa.[QtrType] AS reqQtrType,
+      qa.[PublishedDateFrom] AS publishedDateFrom,
+      qa.[PublishedDateTo] AS publishedDateTo,
       qa.[ExchangeReason] AS exchange,
       qa.[AttachmentPath] AS proofFile,
       CONVERT(varchar(10), qa.[ReqDate], 23) AS reqDate,
-      '' AS rosterNo,
+      qa.[RosterNo] AS rosterNo,
       qa.[Status] AS result
     FROM dbo.Quarter_Applications qa
     LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
@@ -345,18 +515,67 @@ router.get("/status-of-applications", async (req, res) => {
   return res.json({ items: result.recordset });
 });
 
-// router.get("/house-allotment-committee-history", async (req, res) => {
-//   const pool = await getPool();
-//   const result = await pool.request().query(`
-//     SELECT
-//       id,
-//       CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
-//       remarks
-//     FROM dbo.HistoryofAllotment
-//     ORDER BY committeeHeld DESC
-//   `);
-//   return res.json({ items: result.recordset });
-// });
+router.get("/house-allotment-committee-history", async (req, res) => {
+  try {
+    const pool = await getPool();
+    await ensureHistoryOfAllotmentTable(pool);
+
+    const result = await pool.request().query(`
+      SELECT
+        Id,
+        CONVERT(varchar(10), committeeHeld, 23) AS committeeHeld,
+        downloadLink
+      FROM dbo.HistoryofAllotment
+      ORDER BY committeeHeld DESC, Id DESC
+    `);
+
+    return res.json({ items: result.recordset });
+  } catch (err) {
+    console.error("house-allotment-committee-history error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+const HistoryCommitteeSchema = z.object({
+  committeeHeld: z.string().min(1, "committeeHeld is required"),
+});
+
+router.post("/house-allotment-committee-history", committeeUpload.single("file"), async (req, res) => {
+  try {
+    const parsed = HistoryCommitteeSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "committeeHeld is required" });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const pool = await getPool();
+    await ensureHistoryOfAllotmentTable(pool);
+
+    const result = await pool
+      .request()
+      .input("committeeHeld", sql.Date, parsed.data.committeeHeld)
+      .input("downloadLink", sql.NVarChar(500), req.file.filename)
+      .query(`
+        INSERT INTO dbo.HistoryofAllotment (committeeHeld, downloadLink)
+        OUTPUT INSERTED.Id, INSERTED.committeeHeld, INSERTED.downloadLink
+        VALUES (@committeeHeld, @downloadLink)
+      `);
+
+    const inserted = result.recordset[0];
+    return res.status(201).json({
+      id: inserted?.Id,
+      committeeHeld: inserted?.committeeHeld,
+      downloadLink: inserted?.downloadLink,
+    });
+  } catch (err) {
+    console.error("house-allotment-committee-history upload error:", err);
+    return res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
 router.post("/publish", async (req, res) => {
   try {
     const { fromDate, toDate } = req.body;
@@ -368,10 +587,6 @@ router.post("/publish", async (req, res) => {
       });
     }
 
-    // Normalize dates
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
     const from = new Date(fromDate);
     from.setHours(0, 0, 0, 0);
 
@@ -379,6 +594,9 @@ router.post("/publish", async (req, res) => {
     to.setHours(0, 0, 0, 0);
 
     // Validation: From Date cannot be in the past
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     if (from < today) {
       return res.status(400).json({
         error: "From Date cannot be earlier than today's date."

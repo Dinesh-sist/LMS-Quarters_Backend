@@ -19,12 +19,6 @@ ELSE
     );
 }
 
-
-
-
-
-
-
 async function main() {
   const pool = await getPool();
   await upsertUser(pool, "admin", "admin123", "admin");
