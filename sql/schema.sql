@@ -23,6 +23,7 @@ CREATE TABLE Quarter_Applications (
   Id INT IDENTITY(1,1) PRIMARY KEY,
   UserId INT NOT NULL,
   QuarterId INT NULL,
+  PriorityNo INT NULL,
   Status NVARCHAR(24) NOT NULL DEFAULT 'pending', -- 'pending' | 'approved' | 'rejected' | 'cancelled'
   Notes NVARCHAR(400) NULL,
   PublishedDateFrom DATE NULL,
