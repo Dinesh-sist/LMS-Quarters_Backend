@@ -42,6 +42,12 @@ router.get("/vacant", requireAuth, async (req, res) => {
                     ON qat.QTR_ID = qec.QTR_ID
                 WHERE qec.Class_ID = @ClassId
             )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM dbo.Quarter_Applications qa
+                WHERE LOWER(LTRIM(RTRIM(CAST(qa.[Status] AS NVARCHAR(24))))) = 'approved'
+                  AND CAST(qa.[QtrRequested] AS NVARCHAR(64)) = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
+            )
         ORDER BY eq.OBJECTID DESC
       `);
 

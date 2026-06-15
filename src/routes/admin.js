@@ -5,6 +5,7 @@ const multer = require("multer");
 const { z } = require("zod");
 const { getPool, sql } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
+const { sendQuarterApprovalEmail } = require("../Mailer");
 
 
 const router = express.Router();
@@ -77,11 +78,119 @@ async function ensureQuarterApplicationRosterColumn(pool) {
   `);
 }
 
+async function ensureQuarterApplicationPriorityColumn(pool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.Quarter_Applications', 'PriorityNo') IS NULL
+    BEGIN
+      ALTER TABLE dbo.Quarter_Applications
+      ADD PriorityNo INT NULL;
+    END;
+  `);
+}
+
 function normalizeText(value) {
   return String(value || "")
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, " ")
     .trim();
+}
+
+function getClassPriorityRank(value) {
+  const normalized = normalizeText(value);
+
+  if (/^(CLASS\s*)?I(\s|$)/.test(normalized) || normalized === "1" || normalized === "CLASS 1") {
+    return 1;
+  }
+  if (/^(CLASS\s*)?II(\s|$)/.test(normalized) || normalized === "2" || normalized === "CLASS 2") {
+    return 2;
+  }
+  if (/^(CLASS\s*)?III(\s|$)/.test(normalized) || normalized === "3" || normalized === "CLASS 3") {
+    return 3;
+  }
+  if (/^(CLASS\s*)?IV(\s|$)/.test(normalized) || normalized === "4" || normalized === "CLASS 4") {
+    return 4;
+  }
+
+  return 99;
+}
+
+function getCastePriorityRank(value) {
+  const normalized = normalizeText(value);
+  if (normalized === "SC" || /\bSC\b/.test(normalized)) return 1;
+  if (normalized === "ST" || /\bST\b/.test(normalized)) return 2;
+  return 3;
+}
+
+function toTimeOrNull(value) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? null : time;
+}
+
+function compareNullableNumber(a, b) {
+  const aMissing = a == null;
+  const bMissing = b == null;
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  return a - b;
+}
+
+async function rebuildQuarterApplicationPriorityNumbers(db) {
+  const result = await db.request().query(`
+    SELECT
+      qa.[Id],
+      qa.[Class],
+      qa.[Caste],
+      qa.[ReqDate],
+      qa.[CreatedAt],
+      ud.[GradDate],
+      ud.[DateOfJoining],
+      ud.[DateOfBirth]
+    FROM dbo.Quarter_Applications qa WITH (UPDLOCK, HOLDLOCK)
+    LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+    ORDER BY qa.[Id] ASC
+  `);
+
+  const ranked = [...(result.recordset || [])].sort((a, b) => {
+    const classDiff = getClassPriorityRank(a.Class) - getClassPriorityRank(b.Class);
+    if (classDiff !== 0) return classDiff;
+
+    const gradDiff = compareNullableNumber(toTimeOrNull(a.GradDate), toTimeOrNull(b.GradDate));
+    if (gradDiff !== 0) return gradDiff;
+
+    const dojDiff = compareNullableNumber(toTimeOrNull(a.DateOfJoining), toTimeOrNull(b.DateOfJoining));
+    if (dojDiff !== 0) return dojDiff;
+
+    const casteDiff = getCastePriorityRank(a.Caste) - getCastePriorityRank(b.Caste);
+    if (casteDiff !== 0) return casteDiff;
+
+    const dobDiff = compareNullableNumber(toTimeOrNull(a.DateOfBirth), toTimeOrNull(b.DateOfBirth));
+    if (dobDiff !== 0) return dobDiff;
+
+    const reqDiff = compareNullableNumber(toTimeOrNull(a.ReqDate), toTimeOrNull(b.ReqDate));
+    if (reqDiff !== 0) return reqDiff;
+
+    const createdDiff = compareNullableNumber(toTimeOrNull(a.CreatedAt), toTimeOrNull(b.CreatedAt));
+    if (createdDiff !== 0) return createdDiff;
+
+    return Number(a.Id) - Number(b.Id);
+  });
+
+  for (let i = 0; i < ranked.length; i += 1) {
+    // Keep the update focused on the ranking column so timestamps remain meaningful.
+    // eslint-disable-next-line no-await-in-loop
+    await db.request()
+      .input("Id", sql.Int, ranked[i].Id)
+      .input("PriorityNo", sql.Int, i + 1)
+      .query(`
+        UPDATE dbo.Quarter_Applications
+        SET PriorityNo = @PriorityNo
+        WHERE Id = @Id
+      `);
+  }
+
+  return ranked.length;
 }
 
 function isRosterCasteEligible(caste, quarterType, rosterNo) {
@@ -347,6 +456,7 @@ router.post("/checkapprovalsave", async (req, res) => {
     }
     await ensureQuarterApplicationPublishColumns(pool);
     await ensureQuarterApplicationRosterColumn(pool);
+    await ensureQuarterApplicationPriorityColumn(pool);
     const empResult = await pool
       .request()
       .input("UserId", sql.Int, userId)
@@ -445,9 +555,11 @@ router.post("/checkapprovalsave", async (req, res) => {
             @AppNo, @UserId, @EmpId, @EmpName, @Class, @Caste,
             @AllotCatId, @EmailId, GETDATE(), @QtrRequested,
             @QtrLocation, @QtrType, @PublishedDateFrom, @PublishedDateTo,
-            @RosterNo, @Reason, @ExchangeReason, 'pending', GETDATE(), GETDATE()
+          @RosterNo, @Reason, @ExchangeReason, 'pending', GETDATE(), GETDATE()
           )
         `);
+
+      await rebuildQuarterApplicationPriorityNumbers(tx);
 
       await tx.commit();
 
@@ -477,8 +589,11 @@ router.post("/checkapprovalsave", async (req, res) => {
 
 router.get("/status-of-applications", async (req, res) => {
   const pool = await getPool();
+  await ensureQuarterApplicationPriorityColumn(pool);
+  await rebuildQuarterApplicationPriorityNumbers(pool);
   const result = await pool.request().query(`
     SELECT
+      qa.[PriorityNo] AS priorityNo,
       qa.[Id] AS id,
       qa.[AppNo] AS appNo,
       qa.[EmpId] AS empId,
@@ -771,6 +886,55 @@ router.put("/publication/update", async (req, res) => {
     });
   }
 });
+router.delete("/applications/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+
+  try {
+    const pool = await getPool();
+    const current = await pool
+      .request()
+      .input("Id", sql.Int, id)
+      .query(`
+        SELECT TOP 1
+          qa.[Id],
+          qa.[UserId],
+          qa.[Status]
+        FROM dbo.Quarter_Applications qa
+        WHERE qa.[Id] = @Id
+      `);
+
+    const row = current.recordset[0];
+    if (!row) return res.status(404).json({ error: "Not found" });
+
+    const userId = Number(req.user.sub);
+    const isAdmin = String(req.user.role || "").toLowerCase() === "admin";
+    if (!isAdmin && Number(row.UserId) !== userId) {
+      return res.status(403).json({ error: "You can only delete your own application" });
+    }
+
+    const result = await pool
+      .request()
+      .input("Id", sql.Int, id)
+      .query(`
+        DELETE FROM dbo.Quarter_Applications
+        WHERE Id = @Id;
+        SELECT @@ROWCOUNT AS Affected;
+      `);
+
+    const affected = result.recordset[0]?.Affected ?? 0;
+    if (!affected) return res.status(404).json({ error: "Not found" });
+
+    await ensureQuarterApplicationPriorityColumn(pool);
+    await rebuildQuarterApplicationPriorityNumbers(pool);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Delete application error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 router.patch("/applications/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
@@ -782,6 +946,31 @@ router.patch("/applications/:id", async (req, res) => {
   const { status } = parsed.data;
   const pool = await getPool();
 
+  const existing = await pool
+    .request()
+    .input("Id", sql.Int, id)
+    .query(`
+      SELECT TOP 1
+        qa.[Id],
+        qa.[AppNo],
+        qa.[UserId],
+        qa.[EmpId],
+        qa.[EmpName],
+        qa.[EmailId],
+        qa.[QtrRequested],
+        qa.[QtrLocation],
+        qa.[QtrType],
+        qa.[ReqDate],
+        qa.[Status],
+        ud.[Email] AS UserEmail
+      FROM dbo.Quarter_Applications qa
+      LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+      WHERE qa.[Id] = @Id
+    `);
+
+  const current = existing.recordset[0];
+  if (!current) return res.status(404).json({ error: "Not found" });
+
   const result = await pool
     .request()
     .input("Id", sql.Int, id)
@@ -792,6 +981,16 @@ router.patch("/applications/:id", async (req, res) => {
 
   const affected = result.recordset[0]?.Affected ?? 0;
   if (!affected) return res.status(404).json({ error: "Not found" });
+
+  if (String(status).toLowerCase() === "approved" && String(current.Status || "").toLowerCase() !== "approved") {
+    sendQuarterApprovalEmail({
+      ...current,
+      Status: status,
+    }).catch((err) => {
+      console.error(`Quarter approval email failed for application ${id}:`, err);
+    });
+  }
+
   return res.json({ ok: true });
 });
 
