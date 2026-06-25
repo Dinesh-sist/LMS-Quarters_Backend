@@ -16,7 +16,8 @@ const allotmentCategories = require("./routes/allotmentCategories");
 const allotmentHods = require("./routes/allotmentHods");
 const employee = require("./routes/employee");
 const estateQuarters = require("./routes/estateQuarters");
-
+const dashboard = require("./routes/dashboard");
+const employeeClassRoutes = require("./routes/employeeupdation"); 
 function createApp() {
   const app = express();
 
@@ -49,6 +50,8 @@ function createApp() {
   app.use("/api/allotment-hods", allotmentHods);
   app.use("/api/employee", employee);
   app.use("/api/estate-quarters", estateQuarters);
+  app.use("/api/dashboard", dashboard);
+  app.use("/api/employeeupdation", employeeClassRoutes);
 
   app.use((err, req, res, next) => {
     // eslint-disable-next-line no-unused-vars
