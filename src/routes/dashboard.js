@@ -43,9 +43,9 @@ router.get("/estate-quarters/status-counts", requireAuth, async (req, res) => {
     const pool = await getPool();
     const result = await pool.request().query(
       `SELECT 
-        SUM(CASE WHEN status = 'Occupied' THEN 1 ELSE 0 END) AS occupied,
-        SUM(CASE WHEN status = 'Vacant' THEN 1 ELSE 0 END) AS vacant,
-        SUM(CASE WHEN status = 'Beyond Repair' THEN 1 ELSE 0 END) AS beyondRepair
+        SUM(CASE WHEN STATUS1 = 'Occupied' THEN 1 ELSE 0 END) AS occupied,
+        SUM(CASE WHEN STATUS1 = 'Vacant' THEN 1 ELSE 0 END) AS vacant,
+        SUM(CASE WHEN STATUS1 = 'Beyond Repair' THEN 1 ELSE 0 END) AS beyondRepair
        FROM Estate_Quarters`
     );
     const row = result.recordset[0];
@@ -67,11 +67,11 @@ router.get("/estate-quarters/employees-by-type", requireAuth, async (req, res) =
   try {
     const pool = await getPool();
     const result = await pool.request().query(
-      `              SELECT LTRIM(RTRIM([QtrType])) AS type, COUNT(*) AS count
-                     FROM Quarter_Applications
-                     WHERE QtrType IS NOT NULL AND LTRIM(RTRIM([QtrType])) <> ''
-                     GROUP BY LTRIM(RTRIM([QtrType]))
-                     ORDER BY count DESC`
+      `SELECT LTRIM(RTRIM(T.QTR_TYPE)) AS type, COUNT(U.Category) AS count
+       FROM Quarter_Allotment_Type T
+       LEFT JOIN UserDetails U ON LTRIM(RTRIM(T.QTR_TYPE)) = LTRIM(RTRIM(U.Category))
+       GROUP BY LTRIM(RTRIM(T.QTR_TYPE))
+       ORDER BY count DESC, type ASC`
     );
     return res.json(result.recordset);
   } catch (err) {

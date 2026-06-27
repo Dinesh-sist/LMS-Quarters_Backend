@@ -99,22 +99,22 @@ function buildQuarterApprovalBody(application) {
 
   const html = `
     <div style="margin:0;padding:0;background:#eef2ff;">
-      <div style="max-width:720px;margin:0 auto;padding:32px 18px;font-family:Arial,Helvetica,sans-serif;color:#0f172a;line-height:1.5;">
-        <div style="background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 100%);border-radius:18px 18px 0 0;padding:26px 30px;color:#fff;">
+      <div style="max-width:720px;margin:0 auto;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#0f172a;line-height:1.5;">
+        <div style="background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 100%);border-radius:18px 18px 0 0;padding:20px 20px;color:#fff;">
           <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
             <tr>
-              <td style="vertical-align:middle;padding-right:16px;">
-                <img src="cid:ppa-logo" alt="Paradip Port Authority logo" style="display:block;width:64px;height:64px;border-radius:18px;object-fit:cover;background:#fff;" />
+              <td style="vertical-align:middle;padding-right:12px;">
+                <img src="cid:ppa-logo" alt="Paradip Port Authority logo" style="display:block;width:56px;height:56px;border-radius:14px;object-fit:cover;background:#fff;" />
               </td>
               <td style="vertical-align:middle;">
-                <div style="font-size:30px;line-height:1;font-weight:700;letter-spacing:0.02em;white-space:nowrap;">Paradip Port Authority</div>
-                <div style="margin-top:8px;font-size:13px;line-height:1;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;white-space:nowrap;">Land Management System</div>
+                <div style="font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0.02em;word-break:break-word;">Paradip Port Authority</div>
+                <div style="margin-top:6px;font-size:11px;line-height:1.2;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;word-break:break-word;">Land Management System</div>
               </td>
             </tr>
           </table>
         </div>
 
-        <div style="background:#ffffff;border:1px solid #dbeafe;border-top:none;border-radius:0 0 18px 18px;padding:28px 30px;box-shadow:0 18px 45px rgba(15,23,42,0.08);">
+        <div style="background:#ffffff;border:1px solid #dbeafe;border-top:none;border-radius:0 0 18px 18px;padding:24px 20px;box-shadow:0 18px 45px rgba(15,23,42,0.08);">
           <p style="margin:0 0 18px;font-size:medium;font-weight:bold;line-height:1.25;color:#0f172a;">Hello <span style="color:#1d4ed8;">${empName}</span>, your quarter application has been approved.</p>
 
           ${quarterLabel ? `<div style="margin:0 0 22px;padding:14px 16px;border-left:4px solid #2563eb;background:#eff6ff;border-radius:10px;color:#1e3a8a;font-size:14px;font-weight:600;">${quarterLabel}</div>` : ""}
@@ -169,6 +169,80 @@ async function sendQuarterApprovalEmail(application) {
   return { recipients };
 }
 
+async function sendCircularEmail(emails, file, fromDate, toDate) {
+  if (!emails || emails.length === 0) {
+    throw new Error("No recipient email addresses provided for the circular.");
+  }
+
+  const transporter = createTransport();
+  const subject = `New Quarter Application Window Open`;
+  
+  const formattedFrom = formatDate(fromDate);
+  const formattedTo = formatDate(toDate);
+
+  const textLines = [
+    `Hello, a new quarter application window is now open.`,
+    `You can apply from ${formattedFrom} to ${formattedTo}.`,
+    `Please find the attached circular for more details.`
+  ].join("\n");
+
+  const html = `
+    <div style="margin:0;padding:0;background:#eef2ff;">
+      <div style="max-width:720px;margin:0 auto;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#0f172a;line-height:1.5;">
+        <div style="background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 100%);border-radius:18px 18px 0 0;padding:20px 20px;color:#fff;">
+          <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+            <tr>
+              <td style="vertical-align:middle;padding-right:12px;">
+                <img src="cid:ppa-logo" alt="Paradip Port Authority logo" style="display:block;width:56px;height:56px;border-radius:14px;object-fit:cover;background:#fff;" />
+              </td>
+              <td style="vertical-align:middle;">
+                <div style="font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0.02em;word-break:break-word;">Paradip Port Authority</div>
+                <div style="margin-top:6px;font-size:11px;line-height:1.2;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;word-break:break-word;">Land Management System</div>
+              </td>
+            </tr>
+          </table>
+        </div>
+
+        <div style="background:#ffffff;border:1px solid #dbeafe;border-top:none;border-radius:0 0 18px 18px;padding:24px 20px;box-shadow:0 18px 45px rgba(15,23,42,0.08);">
+          <p style="margin:0 0 18px;font-size:medium;font-weight:bold;line-height:1.25;color:#0f172a;">Hello, a new <span style="color:#1d4ed8;">Quarter Application Window</span> has been opened.</p>
+          
+          <div style="margin:0 0 22px;padding:14px 16px;border-left:4px solid #2563eb;background:#eff6ff;border-radius:10px;color:#1e3a8a;font-size:14px;font-weight:600;">
+            Window is open from ${formattedFrom} to ${formattedTo}.
+          </div>
+
+          <p style="margin:0 0 18px;font-size:14px;color:#0f172a;">Please find the official circular attached to this email for more details and guidelines.</p>
+
+          <p style="margin:20px 0 0;color:#64748b;font-size:12px;">
+            This is an automated message from the LMS Quarters portal. Please do not reply to this email.
+          </p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: env("MAIL_FROM", env("MAIL_USER")),
+    bcc: emails.join(", "),
+    subject,
+    text: textLines,
+    html,
+    attachments: [
+      {
+        filename: "Logo.png",
+        path: LOGO_PATH,
+        cid: "ppa-logo",
+      },
+      ...(file ? [{
+        filename: file.originalname,
+        path: file.path,
+      }] : []),
+    ],
+  });
+
+  return { recipients: emails.length };
+}
+
 module.exports = {
   sendQuarterApprovalEmail,
+  sendCircularEmail,
 };
