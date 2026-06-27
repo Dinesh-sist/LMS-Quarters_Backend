@@ -5,7 +5,7 @@ const multer = require("multer");
 const { z } = require("zod");
 const { getPool, sql } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
-const { sendQuarterApprovalEmail } = require("../Mailer");
+const { sendQuarterApprovalEmail, sendCircularEmail } = require("../Mailer");
 
 
 const router = express.Router();
@@ -691,8 +691,12 @@ router.post("/house-allotment-committee-history", committeeUpload.single("file")
   }
 });
 
-router.post("/publish", async (req, res) => {
+router.post("/publish", upload.any(), async (req, res) => {
   try {
+    // Find the circular file if it exists
+    const file = req.files && req.files.find(f => f.fieldname === "circular");
+    if (file) req.file = file;
+
     const { fromDate, toDate } = req.body;
 
     // Validate required fields
@@ -729,12 +733,12 @@ router.post("/publish", async (req, res) => {
 
     // Check if a publication is already active
     const existingPublication = await pool.request().query(`
-      SELECT TOP 1 PublishID
+      SELECT TOP 1 Current_State
       FROM dbo.Publish
-      WHERE Current_State = 'Published'
+      ORDER BY PublishID DESC
     `);
 
-    if (existingPublication.recordset.length > 0) {
+    if (existingPublication.recordset.length > 0 && existingPublication.recordset[0].Current_State === 'Published') {
       return res.status(400).json({
         error: "A publication is already active. Stop the current publication before creating a new one."
       });
@@ -758,6 +762,25 @@ router.post("/publish", async (req, res) => {
           'Published'
         )
       `);
+
+    if (req.file) {
+      try {
+        const emailsResult = await pool.request().query(`
+          SELECT EmailAddress FROM dbo.TestEmails
+        `);
+        const emails = emailsResult.recordset.map((row) => row.EmailAddress).filter(Boolean);
+        
+        if (emails.length > 0) {
+          await sendCircularEmail(emails, req.file, fromDate, toDate);
+        }
+        
+        fs.unlink(req.file.path, (err) => {
+          if (err) console.error("Failed to delete temp circular file:", err);
+        });
+      } catch (emailErr) {
+        console.error("Failed to send circular emails:", emailErr);
+      }
+    }
 
     return res.json({
       success: true,
