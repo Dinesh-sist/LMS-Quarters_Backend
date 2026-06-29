@@ -99,8 +99,7 @@ BEGIN
     DateOfBirth DATE NOT NULL,
     EmployeeName NVARCHAR(120) NOT NULL,
     DateOfJoining DATE NOT NULL,
-    ClassName NVARCHAR(60) NOT NULL,
-    ClassChoice NVARCHAR(60) NOT NULL,
+    EmpClass NVARCHAR(60) NOT NULL,
     Mobile NVARCHAR(20) NOT NULL,
     Email NVARCHAR(120) NOT NULL,
     CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_UserDetails_CreatedAt DEFAULT SYSUTCDATETIME(),
@@ -133,12 +132,11 @@ END
       .input("DateOfBirth", sql.Date, new Date(dateOfBirth))
       .input("EmployeeName", sql.NVarChar(120), employeeName)
       .input("DateOfJoining", sql.Date, new Date(dateOfJoining))
-      .input("ClassName", sql.NVarChar(60), className)
-      .input("ClassChoice", sql.NVarChar(60), classChoice)
+      .input("EmpClass", sql.NVarChar(60), className)
       .input("Mobile", sql.NVarChar(20), mobile)
       .input("Email", sql.NVarChar(120), email)
       .query(
-        "INSERT INTO dbo.UserDetails (UserId, EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, ClassName, ClassChoice, Mobile, Email) VALUES (@UserId, @EmployeeId, @DateOfBirth, @EmployeeName, @DateOfJoining, @ClassName, @ClassChoice, @Mobile, @Email)"
+        "INSERT INTO dbo.UserDetails (UserId, EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, EmpClass, Mobile, Email) VALUES (@UserId, @EmployeeId, @DateOfBirth, @EmployeeName, @DateOfJoining, @EmpClass, @Mobile, @Email)"
       );
 
     await tx.commit();

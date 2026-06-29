@@ -3,7 +3,7 @@ const { getPool } = require("../db");
 const { requireAuth } = require("../middleware/auth");
 
 const router = express.Router();
--
+
 const LABEL_TO_DB = {
   "Sr.Class 1": "SR-CLASS-I",
   "Jr.Class 1": "JR-CLASS-I",
@@ -27,7 +27,7 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
         [EmployeeId]               AS empId,
         [EmployeeName]             AS empName,
         [DPT_NM]                   AS department,
-        LTRIM(RTRIM([ClassName]))  AS currentClass
+        LTRIM(RTRIM([EmpClass]))  AS currentClass
       FROM [LMSQuartersNew].[dbo].[UserDetails]
     `);
 
@@ -43,7 +43,9 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
   }
 });
 
-
+// ---------------------------------------------------------------------------
+// POST /employee-classes/update
+// ---------------------------------------------------------------------------
 router.post("/employee-classes/update", requireAuth, async (req, res) => {
   const { empId, newClass } = req.body || {};
 
@@ -68,14 +70,14 @@ router.post("/employee-classes/update", requireAuth, async (req, res) => {
       .input("dbClassValue", dbClassValue)
       .query(`
         UPDATE [LMSQuartersNew].[dbo].[UserDetails]
-        SET [ClassName] = @dbClassValue
+        SET [EmpClass] = @dbClassValue
         WHERE [EmployeeId] = @empId;
 
         SELECT
           [EmployeeId]               AS empId,
           [EmployeeName]             AS empName,
           [DPT_NM]                   AS department,
-          LTRIM(RTRIM([ClassName]))  AS currentClass
+          LTRIM(RTRIM([EmpClass]))  AS currentClass
         FROM [LMSQuartersNew].[dbo].[UserDetails]
         WHERE [EmployeeId] = @empId;
       `);
@@ -92,7 +94,7 @@ router.post("/employee-classes/update", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("POST /employeeupdation/employee-classes/update failed:", err);
-    res.status(500).json({ message: err.message, code: err.code }); // TEMP — revert after debugging
+    res.status(500).json({ message: err.message, code: err.code });
   }
 });
 
