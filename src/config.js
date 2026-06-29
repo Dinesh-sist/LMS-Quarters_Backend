@@ -16,7 +16,6 @@ const allowedOrigins = env("ALLOWED_ORIGINS", "http://localhost:5173,http://loca
   .filter(Boolean);
 
 
-
 module.exports = {
   port: Number(env("PORT", "5000")),
   nodeEnv: env("NODE_ENV", "development"),
@@ -24,11 +23,11 @@ module.exports = {
   allowedOrigins, // ✅ just reference the variable
   db: {
 
-    server: env("DB_SERVER", "localhost"),
+    server: env("DB_SERVER", "localhost"),  
     port: Number(env("DB_PORT", "1433")),
-    database: env("DB_DATABASE", "lmsQUARTERS"),
+    database: env("DB_DATABASE", "LMSQuartersNew"),
     user: env("DB_USER", "Dhinesh"),
-    password: env("DB_PASSWORD", "Dhinesh1714"),
+    password: env("DB_PASSWORD", "dhinesh1714"),
     encrypt: envBool("DB_ENCRYPT", false),
     trustServerCertificate: envBool("DB_TRUST_SERVER_CERT", true)
   }
