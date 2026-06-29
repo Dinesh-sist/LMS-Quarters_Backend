@@ -27,7 +27,7 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
         [EmployeeId]               AS empId,
         [EmployeeName]             AS empName,
         [DPT_NM]                   AS department,
-        LTRIM(RTRIM([ClassName]))  AS currentClass
+        LTRIM(RTRIM([EmpClass]))  AS currentClass
       FROM [LMSQuartersNew].[dbo].[UserDetails]
     `);
 
@@ -70,14 +70,14 @@ router.post("/employee-classes/update", requireAuth, async (req, res) => {
       .input("dbClassValue", dbClassValue)
       .query(`
         UPDATE [LMSQuartersNew].[dbo].[UserDetails]
-        SET [ClassName] = @dbClassValue
+        SET [EmpClass] = @dbClassValue
         WHERE [EmployeeId] = @empId;
 
         SELECT
           [EmployeeId]               AS empId,
           [EmployeeName]             AS empName,
           [DPT_NM]                   AS department,
-          LTRIM(RTRIM([ClassName]))  AS currentClass
+          LTRIM(RTRIM([EmpClass]))  AS currentClass
         FROM [LMSQuartersNew].[dbo].[UserDetails]
         WHERE [EmployeeId] = @empId;
       `);

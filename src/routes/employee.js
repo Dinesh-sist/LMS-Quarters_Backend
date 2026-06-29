@@ -154,13 +154,13 @@ router.get("/me", requireAuth, async (req, res) => {
     .request()
     .input("UserId", sql.Int, userId)
     .query(
-      "SELECT EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, GradDate, ClassName, ClassChoice, Mobile, Email FROM dbo.UserDetails WHERE UserId=@UserId"
+      "SELECT EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, GradDate, EmpClass, Mobile, Email, DPT_NM AS Department, DebarredFromDate, DebarredToDate FROM dbo.UserDetails WHERE UserId=@UserId"
     );
 
   const row = details.recordset?.[0];
   if (!row) return res.status(404).json({ error: "User details not found" });
 
-  const className = String(row.ClassName || row.ClassChoice || "").trim();
+  const className = String(row.EmpClass || "").trim();
   const classLookup = await pool
     .request()
     .input("ClassName", sql.NVarChar(60), `%${className}%`)
@@ -203,6 +203,12 @@ router.get("/me", requireAuth, async (req, res) => {
   const formatGradDate = row.GradDate ? 
     `${row.GradDate.getFullYear()}-${String(row.GradDate.getMonth() + 1).padStart(2, '0')}-${String(row.GradDate.getDate()).padStart(2, '0')}` : "";
 
+  const formatDebarredFromDate = row.DebarredFromDate ? 
+    `${row.DebarredFromDate.getFullYear()}-${String(row.DebarredFromDate.getMonth() + 1).padStart(2, '0')}-${String(row.DebarredFromDate.getDate()).padStart(2, '0')}` : "";
+    
+  const formatDebarredToDate = row.DebarredToDate ? 
+    `${row.DebarredToDate.getFullYear()}-${String(row.DebarredToDate.getMonth() + 1).padStart(2, '0')}-${String(row.DebarredToDate.getDate()).padStart(2, '0')}` : "";
+
   return res.json({
     employeeId: row.EmployeeId || "",
     employeeName: row.EmployeeName || "",
@@ -210,9 +216,12 @@ router.get("/me", requireAuth, async (req, res) => {
     dateOfJoining: formatDOJ,
     gradDate: formatGradDate,
     type: type, 
-    classOfEmployee: row.ClassName || row.ClassChoice || "",
+    classOfEmployee: row.EmpClass || "",
     casteOfEmployee: casteOfEmployee, 
     classId: classId,
+    department: row.Department || "",
+    debarredFromDate: formatDebarredFromDate,
+    debarredToDate: formatDebarredToDate,
   });
 });
 

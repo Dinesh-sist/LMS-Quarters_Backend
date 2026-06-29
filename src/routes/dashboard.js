@@ -87,10 +87,10 @@ router.get("/employees/count-by-class", requireAuth, async (req, res) => {
   try {
     const pool = await getPool();
     const result = await pool.request().query(
-      `SELECT LTRIM(RTRIM([ClassName])) AS className, COUNT(*) AS count
+      `SELECT LTRIM(RTRIM([EmpClass])) AS className, COUNT(*) AS count
      FROM UserDetails
-     WHERE [ClassName] IS NOT NULL AND LTRIM(RTRIM([ClassName])) <> ''
-     GROUP BY LTRIM(RTRIM([ClassName]))
+     WHERE [EmpClass] IS NOT NULL AND LTRIM(RTRIM([EmpClass])) <> ''
+     GROUP BY LTRIM(RTRIM([EmpClass]))
      ORDER BY count DESC`
     );
     return res.json(result.recordset);

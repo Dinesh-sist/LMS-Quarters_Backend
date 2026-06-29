@@ -304,6 +304,7 @@ router.get("/verify-quarter-applications", async (req, res) => {
         qa.[Status],
         qa.[PublishedDateFrom],
         qa.[PublishedDateTo],
+        ud.[Basic] AS Basic,
         CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
         CONVERT(varchar(10), ud.GradDate, 23) AS GradDate,
         CONVERT(varchar(19), qa.[CreatedAt], 120)  AS CreatedAt,
@@ -464,7 +465,7 @@ router.post("/checkapprovalsave", async (req, res) => {
         SELECT
           [EmployeeId]   AS EmpId,
           [EmployeeName] AS EmpName,
-          [ClassName]    AS Class,
+          [EmpClass]    AS Class,
           [Email]        AS EmailId,
           [DateOfBirth]  AS DOB,
           [DateOfJoining] AS DOJ,
@@ -595,13 +596,14 @@ router.get("/status-of-applications", async (req, res) => {
     SELECT
       qa.[PriorityNo] AS priorityNo,
       qa.[Id] AS id,
+      qa.[UserId] AS userId,
       qa.[AppNo] AS appNo,
       qa.[EmpId] AS empId,
       qa.[EmpName] AS empName,
       qa.[Class] AS class,
       CONVERT(varchar(10), ud.GradDate, 23) AS gradDate,
       CONVERT(varchar(10), ud.DateOfJoining, 23) AS dateOfJoin,
-      '' AS basic,
+      ud.[Basic] AS basic,
       CONVERT(varchar(10), ud.DateOfBirth, 23) AS dob,
       '' AS dept,
       qa.[Caste] AS casteId,
@@ -628,6 +630,49 @@ router.get("/status-of-applications", async (req, res) => {
     ORDER BY qa.[Id] DESC
   `);
   return res.json({ items: result.recordset });
+});
+
+async function ensureUserDetailsDebarredColumns(pool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.UserDetails', 'DebarredFromDate') IS NULL
+    BEGIN
+      ALTER TABLE dbo.UserDetails
+      ADD DebarredFromDate DATE NULL;
+    END;
+
+    IF COL_LENGTH('dbo.UserDetails', 'DebarredToDate') IS NULL
+    BEGIN
+      ALTER TABLE dbo.UserDetails
+      ADD DebarredToDate DATE NULL;
+    END;
+  `);
+}
+
+router.post("/debar-user", async (req, res) => {
+  try {
+    const { userId, fromDate, toDate } = req.body;
+    if (!userId || !fromDate || !toDate) {
+      return res.status(400).json({ error: "userId, fromDate, and toDate are required." });
+    }
+
+    const pool = await getPool();
+    await ensureUserDetailsDebarredColumns(pool);
+
+    await pool.request()
+      .input("UserId", sql.Int, userId)
+      .input("FromDate", sql.Date, fromDate)
+      .input("ToDate", sql.Date, toDate)
+      .query(`
+        UPDATE dbo.UserDetails
+        SET DebarredFromDate = @FromDate, DebarredToDate = @ToDate
+        WHERE UserId = @UserId
+      `);
+
+    return res.json({ success: true, message: "User has been debarred successfully." });
+  } catch (err) {
+    console.error("debar-user error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 router.get("/house-allotment-committee-history", async (req, res) => {
