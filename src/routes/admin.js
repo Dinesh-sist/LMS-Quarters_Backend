@@ -492,7 +492,7 @@ router.post("/checkapprovalsave", async (req, res) => {
           CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QuarterNo,
           CAST(CATEGORY         AS NVARCHAR(64)) AS QuarterType,
           CAST(AREA_TYPE        AS NVARCHAR(64)) AS Location
-        FROM [LMSQuarters].[dbo].[Estate_Quarters]
+        FROM dbo.[Estate_Quarters]
         WHERE OBJECTID = @QuarterId
       `);
     const qtr = qtrResult.recordset[0] || {};
