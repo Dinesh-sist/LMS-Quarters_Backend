@@ -16,6 +16,8 @@ const allotmentCategories = require("./routes/allotmentCategories");
 const allotmentHods = require("./routes/allotmentHods");
 const employee = require("./routes/employee");
 const estateQuarters = require("./routes/estateQuarters");
+const map = require("./routes/map");
+
 const dashboard = require("./routes/dashboard");
 const employeeClassRoutes = require("./routes/employeeupdation"); 
 function createApp() {
@@ -50,6 +52,7 @@ function createApp() {
   app.use("/api/allotment-hods", allotmentHods);
   app.use("/api/employee", employee);
   app.use("/api/estate-quarters", estateQuarters);
+  app.use("/api/map", map);
   app.use("/api/dashboard", dashboard);
   app.use("/api/employeeupdation", employeeClassRoutes);
 
