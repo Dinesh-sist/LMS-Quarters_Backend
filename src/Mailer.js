@@ -176,7 +176,7 @@ async function sendCircularEmail(emails, file, fromDate, toDate) {
 
   const transporter = createTransport();
   const subject = `New Quarter Application Window Open`;
-  
+
   const formattedFrom = formatDate(fromDate);
   const formattedTo = formatDate(toDate);
 
@@ -242,7 +242,82 @@ async function sendCircularEmail(emails, file, fromDate, toDate) {
   return { recipients: emails.length };
 }
 
+async function sendCircularEmailWithBuffer(emails, pdfBuffer, circularData) {
+  if (!emails || emails.length === 0) {
+    throw new Error("No recipient email addresses provided for the circular.");
+  }
+
+  const transporter = createTransport();
+  const subject = `New Quarter Application Window Open - Official Circular`;
+
+  const from = circularData.appFromDate || "";
+  const to = circularData.appToDate || "";
+  const qtyStr = Array.isArray(circularData.quarterTypes)
+    ? circularData.quarterTypes.join(", ")
+    : (circularData.quarterTypes || "");
+
+  const textLines = [
+    `Hello, a new quarter application window is now open.`,
+    `Quarter Types: ${qtyStr}`,
+    `Application window: ${from} to ${to}.`,
+    `Please find the attached official circular for more details.`
+  ].join("\n");
+
+
+  const html = `
+    <div style="margin:0;padding:0;background:#eef2ff;">
+      <div style="max-width:720px;margin:0 auto;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#0f172a;line-height:1.5;">
+        <div style="background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 100%);border-radius:18px 18px 0 0;padding:20px 20px;color:#fff;">
+          <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+            <tr>
+              <td style="vertical-align:middle;padding-right:12px;">
+                <img src="cid:ppa-logo" alt="Paradip Port Authority logo" style="display:block;width:56px;height:56px;border-radius:14px;object-fit:cover;background:#fff;" />
+              </td>
+              <td style="vertical-align:middle;">
+                <div style="font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0.02em;">Paradip Port Authority</div>
+                <div style="margin-top:6px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;">Land Management System</div>
+              </td>
+            </tr>
+          </table>
+        </div>
+        <div style="background:#ffffff;border:1px solid #dbeafe;border-top:none;border-radius:0 0 18px 18px;padding:24px 20px;box-shadow:0 18px 45px rgba(15,23,42,0.08);">
+          <p style="margin:0 0 18px;font-size:15px;font-weight:bold;color:#0f172a;">A new <span style="color:#1d4ed8;">Quarter Application Window</span> is now open.</p>
+          <div style="margin:0 0 16px;padding:14px 16px;border-left:4px solid #2563eb;background:#eff6ff;border-radius:10px;color:#1e3a8a;font-size:14px;font-weight:600;">
+            Quarter Types: ${escapeHtml(qtyStr)}<br/>
+            Application window: ${escapeHtml(from)} to ${escapeHtml(to)}
+          </div>
+          <p style="margin:0 0 18px;font-size:14px;color:#0f172a;">Please find the <strong>official circular</strong> attached to this email for complete details and guidelines.</p>
+          <p style="margin:20px 0 0;color:#64748b;font-size:12px;">This is an automated message from the LMS Quarters portal. Please do not reply to this email.</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: env("MAIL_FROM", env("MAIL_USER")),
+    bcc: emails.join(", "),
+    subject,
+    text: textLines,
+    html,
+    attachments: [
+      {
+        filename: "Logo.png",
+        path: LOGO_PATH,
+        cid: "ppa-logo",
+      },
+      {
+        filename: `Circular_${new Date().toISOString().slice(0, 10)}.pdf`,
+        content: pdfBuffer,
+        contentType: "application/pdf",
+      },
+    ],
+  });
+
+  return { recipients: emails.length };
+}
+
 module.exports = {
   sendQuarterApprovalEmail,
   sendCircularEmail,
+  sendCircularEmailWithBuffer,
 };
