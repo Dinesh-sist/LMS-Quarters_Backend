@@ -2,10 +2,11 @@ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
+const PDFDocument = require("pdfkit");
 const { z } = require("zod");
 const { getPool, sql } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
-const { sendQuarterApprovalEmail, sendCircularEmail } = require("../Mailer");
+const { sendQuarterApprovalEmail, sendCircularEmail, sendCircularEmailWithBuffer } = require("../Mailer");
 
 
 const router = express.Router();
@@ -814,11 +815,11 @@ router.post("/publish", upload.any(), async (req, res) => {
           SELECT EmailAddress FROM dbo.TestEmails
         `);
         const emails = emailsResult.recordset.map((row) => row.EmailAddress).filter(Boolean);
-        
+
         if (emails.length > 0) {
           await sendCircularEmail(emails, req.file, fromDate, toDate);
         }
-        
+
         fs.unlink(req.file.path, (err) => {
           if (err) console.error("Failed to delete temp circular file:", err);
         });
@@ -1060,6 +1061,211 @@ router.patch("/applications/:id", async (req, res) => {
   }
 
   return res.json({ ok: true });
+});
+
+// ── GET /api/admin/quarter-types — distinct categories from UserDetails ────────
+router.get("/quarter-types", async (req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request().query(`
+      SELECT DISTINCT LTRIM(RTRIM(CAST(Category AS NVARCHAR(100)))) AS QuarterType
+      FROM dbo.UserDetails
+      WHERE Category IS NOT NULL AND LTRIM(RTRIM(CAST(Category AS NVARCHAR(100)))) <> ''
+      ORDER BY QuarterType ASC
+    `);
+    const types = result.recordset.map((r) => r.QuarterType);
+    return res.json({ types });
+  } catch (err) {
+    console.error("quarter-types error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
+async function buildCircularPDF(body) {
+  const {
+    circularNo,
+    circularDate,
+    quarterTypes,
+    appFromDate,
+    appToDate,
+    closingTime,
+    openingTime,
+    verifyFromDate,
+    verifyToDate,
+    contactName,
+    contactDesignation,
+    contactNumber,
+    contactArea,
+  } = body;
+
+  const formatTime = (t) => {
+    let ft = t || "______";
+    if (ft && /^([01]\d|2[0-3]):([0-5]\d)$/.test(ft)) {
+      const [h, m] = ft.split(":");
+      let hours = parseInt(h, 10);
+      const ampm = hours >= 12 ? "PM" : "AM";
+      hours = hours % 12;
+      hours = hours ? hours : 12;
+      const hoursStr = hours < 10 ? "0" + hours : hours;
+      ft = `${hoursStr}.${m} ${ampm}`;
+    }
+    return ft;
+  };
+
+  const formattedOpeningTime = formatTime(openingTime || closingTime);
+
+  const doc = new PDFDocument({ margin: 60, size: "A4" });
+  const chunks = [];
+  doc.on("data", (chunk) => chunks.push(chunk));
+
+  const pdfReady = new Promise((resolve, reject) => {
+    doc.on("end", resolve);
+    doc.on("error", reject);
+  });
+
+  const LOGO_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "Logo.png");
+  const logoExists = fs.existsSync(LOGO_PATH);
+
+  const SAGARMALA_LOGO_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "sagaramala.png");
+  const sagarmalaExists = fs.existsSync(SAGARMALA_LOGO_PATH);
+
+  // ── Header ──────────────────────────────────────────────────────────────
+  doc.font("Helvetica-Bold").fontSize(11);
+  const headerX = 60;
+
+  if (logoExists) {
+    try { doc.image(LOGO_PATH, headerX, 55, { width: 55, height: 55 }); } catch (_) { }
+  }
+
+  if (sagarmalaExists) {
+    try { doc.image(SAGARMALA_LOGO_PATH, 465, 55, { width: 70 }); } catch (_) { }
+  }
+
+  doc
+    .font("Helvetica-Bold").fontSize(11)
+    .text("PARADIP PORT AUTHORITY", headerX, 58, { align: "center", width: 475 })
+    .text("ADMINISTRATIVE DEPARTMENT", { align: "center", width: 475 })
+    .text("(ESTATE WING)", { align: "center", width: 475 });
+
+  if (!sagarmalaExists) {
+    doc.font("Helvetica").fontSize(9)
+      .text("SAGARMALA", headerX, 90, { align: "right", width: 475 });
+  }
+
+  doc.moveTo(60, 115).lineTo(535, 115).stroke();
+
+  // Position cursor below the line
+  doc.y = 125;
+  const dateLine = `Date: ${circularDate || "______"}`;
+  doc
+    .font("Helvetica").fontSize(11)
+    .text(dateLine, { align: "right" });
+
+  doc.moveDown(1.5);
+
+  // ── Title ────────────────────────────────────────────────────────────────
+  doc.font("Helvetica-Bold").fontSize(14).text("CIRCULAR", { align: "center", underline: true });
+  doc.moveDown(1.5);
+
+  // ── Body ─────────────────────────────────────────────────────────────────
+  const qtyStr = Array.isArray(quarterTypes) ? quarterTypes.join(", ") : (quarterTypes || "______");
+  doc.font("Helvetica").fontSize(11)
+    .text(
+      `The Officers/employees are requested to submit their application for allotment of ` +
+      `${qtyStr} quarters on online Web Based GIS Software from ` +
+      `${appFromDate || "______"} to ${appToDate || "______"} by ${formattedOpeningTime}. ` +
+      `After completion of the scheduled date and time the application submitted for allotment of ` +
+      `quarters will not be entertained.`,
+      { align: "justify", lineGap: 5 }
+    );
+
+  doc.moveDown(1.5);
+  doc.font("Helvetica-Bold").fontSize(11)
+    .text(
+      `"They have to verify the conditions of the quarters on ` +
+      `${verifyFromDate || "______"} to ${verifyToDate || "______"} before applying online. ` +
+      `No further request will be considered for exchange / refusal after allotment".`,
+      { align: "justify", lineGap: 5 }
+    );
+
+  doc.moveDown(2);
+  doc.font("Helvetica").fontSize(11)
+    .text(
+      "It is requested to contact the following Estate personnel who will assist for verifying the " +
+      "conditions of the quarters on the above mentioned day only.",
+      { align: "justify", lineGap: 5 }
+    );
+
+  doc.moveDown(1.5);
+  const contactLine =
+    `1.  ${contactName || "______"}, ${contactDesignation || "______"} - ` +
+    `${contactNumber || "______"} for ${contactArea || "______"}.`;
+  doc.font("Helvetica-Bold").fontSize(11).text(contactLine, { underline: true, lineGap: 5 });
+
+  doc.moveDown(3);
+  doc.font("Helvetica-Bold").fontSize(12)
+    .text("Sr. Asst. Estate Manager,", { align: "right" })
+    .text("Paradip Port Authority", { align: "right" });
+
+  doc.moveDown(3);
+  doc.font("Helvetica-Bold").fontSize(11).text("Copy to :");
+  doc.moveDown(1);
+  const copies = [
+    "All Heads of Departments/Heads of Officers, Paradip Port Authority for kind information of all concerned.",
+    "The P.S. to Chairman for kind information of the Chairman, PPA.",
+    "The PA to Dy. Chairman for kind information of Dy. Chairman, PPA.",
+    "The all DDOs, Paradip Port Authority for information and necessary action. It is requested to inform all the employees working under their establishment to apply for the quarters on online mode.",
+    "The HA/Jr. R.I./Zone In charges, Estate Wing, PPA for information and necessary action.",
+    "Project Associate, IIT Madras/Office Order Guard File.",
+  ];
+  copies.forEach((item, idx) => {
+    doc.font("Helvetica").fontSize(10)
+      .text(`${idx + 1}.  ${item}`, { align: "justify", indent: 20 });
+    doc.moveDown(0.2);
+  });
+
+  doc.end();
+  await pdfReady;
+
+  return Buffer.concat(chunks);
+}
+
+// ── POST /api/admin/preview-circular — view PDF without sending email ─────────
+router.post("/preview-circular", async (req, res) => {
+  try {
+    const pdfBuffer = await buildCircularPDF(req.body);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline; filename=circular_preview.pdf");
+    return res.send(pdfBuffer);
+  } catch (err) {
+    console.error("preview-circular error:", err);
+    return res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
+// ── POST /api/admin/generate-circular — build PDF & email ─────────────────────
+router.post("/generate-circular", async (req, res) => {
+  try {
+    const pdfBuffer = await buildCircularPDF(req.body);
+
+    // ── Send email ────────────────────────────────────────────────────────────
+    const pool = await getPool();
+    const emailsResult = await pool.request().query(`SELECT EmailAddress FROM dbo.TestEmails`);
+    const emails = emailsResult.recordset.map((r) => r.EmailAddress).filter(Boolean);
+
+    let emailSent = false;
+    if (emails.length > 0) {
+      await sendCircularEmailWithBuffer(emails, pdfBuffer, req.body);
+      emailSent = true;
+    }
+
+    return res.json({ success: true, emailSent, recipientCount: emails.length });
+  } catch (err) {
+    console.error("generate-circular error:", err);
+    return res.status(500).json({ error: err.message || "Internal server error" });
+  }
 });
 
 module.exports = router;

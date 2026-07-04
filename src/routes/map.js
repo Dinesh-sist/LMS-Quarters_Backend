@@ -4,7 +4,7 @@ const { requireAuth } = require("../middleware/auth");
 
 const router = express.Router();
 
-const TABLE_NAME = "[LMSQuartersNew1].[dbo].[Estate_Quarters]";
+const TABLE_NAME = "[LMSQuartersNew].[dbo].[Estate_Quarters]";
 const spatialColumnCache = new Map();
 
 async function resolveSpatialColumn(pool, tableName) {
@@ -41,9 +41,9 @@ async function resolveSpatialColumn(pool, tableName) {
     const row = meta.recordset?.[0];
     const resolved = row
       ? {
-          columnName: String(row.ColumnName || "").trim(),
-          typeName: String(row.TypeName || "").trim().toLowerCase(),
-        }
+        columnName: String(row.ColumnName || "").trim(),
+        typeName: String(row.TypeName || "").trim().toLowerCase(),
+      }
       : null;
     spatialColumnCache.set(key, resolved);
     return resolved;
