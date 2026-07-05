@@ -155,6 +155,37 @@ router.get("/numbers", requireAuth, async (req, res) => {
   }
 });
 
+router.get("/current-status", requireAuth, async (req, res) => {
+  const { area, quarterNumber } = req.query;
+  if (!area || !quarterNumber) {
+    return res.status(400).json({ error: "area and quarterNumber are required" });
+  }
+
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("p_Area", sql.NVarChar(64), area)
+      .input("p_QuarterNo", sql.NVarChar(64), quarterNumber)
+      .query(`
+        SELECT TOP 1 CAST(STATUS1 AS NVARCHAR(64)) AS Status
+        FROM dbo.[Estate_Quarters]
+        WHERE CAST(AREA_TYPE AS NVARCHAR(64)) = @p_Area
+          AND CAST([QUARTER NUMBER] AS NVARCHAR(64)) = @p_QuarterNo
+      `);
+
+    if (result.recordset.length === 0) {
+      return res.status(404).json({ error: "Quarter not found" });
+    }
+
+    const rawStatus = result.recordset[0]?.Status || "";
+    return res.json({ status: rawStatus });
+  } catch (err) {
+    console.error("Error fetching current quarter status:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 router.post("/update-status", requireAuth, async (req, res) => {
   const { area, quarterNumber, status } = req.body;
   if (!area || !quarterNumber || !status) {
