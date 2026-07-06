@@ -13,9 +13,31 @@ router.get("/vacant", requireAuth, async (req, res) => {
 
   try {
     const pool = await getPool();
+
+    // ── Fetch active publication's allowed quarter types ──────────────────────
+    let publishedTypes = [];
+    let quarterTypesParam = null;
+    try {
+      const pubResult = await pool.request().query(`
+        SELECT TOP 1 CAST(QuarterTypes AS NVARCHAR(MAX)) AS QuarterTypes
+        FROM dbo.Publish
+        WHERE Current_State = 'Published'
+        ORDER BY PublishID DESC
+      `);
+      const raw = pubResult.recordset[0]?.QuarterTypes || "";
+      publishedTypes = raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      quarterTypesParam = publishedTypes.length > 0 ? publishedTypes.join(",") : null;
+    } catch {
+      // QuarterTypes column may not exist yet (first publish was before this migration)
+      publishedTypes = [];
+      quarterTypesParam = null;
+    }
+
     const result = await pool
       .request()
       .input("ClassId", sql.Int, parseInt(classId))
+      .input("QuarterTypes", sql.NVarChar(sql.MAX), quarterTypesParam)
+      .input("UserId", sql.Int, Number(req.user.sub))
       .query(`
         SELECT
             CAST(eq.OBJECTID AS INT)                   AS Id,
@@ -33,7 +55,7 @@ router.get("/vacant", requireAuth, async (req, res) => {
             GROUP BY CAST(QtrRequested AS NVARCHAR(64))
         ) app
             ON app.QuarterNo = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
-        WHERE 
+        WHERE
             UPPER(LTRIM(RTRIM(CAST(eq.STATUS1 AS NVARCHAR(32))))) = 'VACANT'
             AND CAST(eq.CATEGORY AS NVARCHAR(64)) IN (
                 SELECT CAST(qat.QTR_TYPE AS NVARCHAR(64))
@@ -42,11 +64,27 @@ router.get("/vacant", requireAuth, async (req, res) => {
                     ON qat.QTR_ID = qec.QTR_ID
                 WHERE qec.Class_ID = @ClassId
             )
+            AND (
+              @QuarterTypes IS NULL
+              OR CAST(eq.CATEGORY AS NVARCHAR(64)) IN (
+                SELECT LTRIM(RTRIM(value))
+                FROM STRING_SPLIT(@QuarterTypes, ',')
+              )
+            )
             AND NOT EXISTS (
+                -- Globally hide quarters that are already approved for someone else
                 SELECT 1
                 FROM dbo.Quarter_Applications qa
                 WHERE LOWER(LTRIM(RTRIM(CAST(qa.[Status] AS NVARCHAR(24))))) = 'approved'
                   AND CAST(qa.[QtrRequested] AS NVARCHAR(64)) = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
+            )
+            AND NOT EXISTS (
+                -- Hide quarters that the CURRENT user has already applied for (if not rejected/cancelled)
+                SELECT 1
+                FROM dbo.Quarter_Applications qa
+                WHERE qa.UserId = @UserId
+                  AND CAST(qa.[QtrRequested] AS NVARCHAR(64)) = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
+                  AND LOWER(LTRIM(RTRIM(CAST(qa.[Status] AS NVARCHAR(24))))) NOT IN ('rejected', 'cancelled', 'vacated')
             )
         ORDER BY eq.OBJECTID DESC
       `);
@@ -61,13 +99,14 @@ router.get("/vacant", requireAuth, async (req, res) => {
       IsAvailable: true
     }));
 
-    return res.json({ items, total: items.length });
+    return res.json({ items, total: items.length, publishedTypes });
 
   } catch (err) {
     console.error("Error fetching vacant quarters:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 router.get("/total-count", requireAuth, async (req, res) => {
   try {

@@ -154,7 +154,7 @@ router.get("/me", requireAuth, async (req, res) => {
     .request()
     .input("UserId", sql.Int, userId)
     .query(
-      "SELECT EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, GradDate, EmpClass, Mobile, Email, DPT_NM AS Department, DebarredFromDate, DebarredToDate FROM dbo.UserDetails WHERE UserId=@UserId"
+      "SELECT EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, GradDate, EmpClass, Mobile, Email, DPT_NM AS Department, Category, DebarredFromDate, DebarredToDate FROM dbo.UserDetails WHERE UserId=@UserId"
     );
 
   const row = details.recordset?.[0];
@@ -215,10 +215,11 @@ router.get("/me", requireAuth, async (req, res) => {
     dateOfBirth: formatDOB,
     dateOfJoining: formatDOJ,
     gradDate: formatGradDate,
-    type: type, 
+    type: type,
     classOfEmployee: row.EmpClass || "",
-    casteOfEmployee: casteOfEmployee, 
+    casteOfEmployee: casteOfEmployee,
     classId: classId,
+    category: row.Category || "",
     department: row.Department || "",
     debarredFromDate: formatDebarredFromDate,
     debarredToDate: formatDebarredToDate,
