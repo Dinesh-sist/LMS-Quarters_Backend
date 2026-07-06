@@ -411,6 +411,9 @@ router.post("/checkapprovalsave", async (req, res) => {
       quarterId,
       reason = null,
       exchangeReason = null,
+      quarterNo = null,
+      quarterType = null,
+      location = null,
     } = req.body;
 
     if (!quarterId) {
@@ -485,18 +488,27 @@ router.post("/checkapprovalsave", async (req, res) => {
     let casteValue = emp.Caste || "GENERAL";
     // ────────────────────────────────────────────────────────────────────────
 
-    const qtrResult = await pool
-      .request()
-      .input("QuarterId", sql.Int, parseInt(quarterId))
-      .query(`
-        SELECT
-          CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QuarterNo,
-          CAST(CATEGORY         AS NVARCHAR(64)) AS QuarterType,
-          CAST(AREA_TYPE        AS NVARCHAR(64)) AS Location
-        FROM dbo.[Estate_Quarters]
-        WHERE OBJECTID = @QuarterId
-      `);
-    const qtr = qtrResult.recordset[0] || {};
+    let qtr = {};
+    if (quarterNo && quarterType && location) {
+      qtr = {
+        QuarterNo: String(quarterNo),
+        QuarterType: String(quarterType),
+        Location: String(location)
+      };
+    } else {
+      const qtrResult = await pool
+        .request()
+        .input("QuarterId", sql.Int, parseInt(quarterId))
+        .query(`
+          SELECT
+            CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QuarterNo,
+            CAST(CATEGORY         AS NVARCHAR(64)) AS QuarterType,
+            CAST(AREA_TYPE        AS NVARCHAR(64)) AS Location
+          FROM dbo.[Estate_Quarters]
+          WHERE OBJECTID = @QuarterId
+        `);
+      qtr = qtrResult.recordset[0] || {};
+    }
 
 
     const appNo = "APP-" + Date.now();
@@ -737,6 +749,15 @@ router.post("/house-allotment-committee-history", committeeUpload.single("file")
   }
 });
 
+async function ensurePublishQuarterTypesColumn(pool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.Publish', 'QuarterTypes') IS NULL
+    BEGIN
+      ALTER TABLE dbo.Publish ADD QuarterTypes NVARCHAR(MAX) NULL;
+    END;
+  `);
+}
+
 router.post("/publish", upload.any(), async (req, res) => {
   try {
     // Find the circular file if it exists
@@ -790,22 +811,39 @@ router.post("/publish", upload.any(), async (req, res) => {
       });
     }
 
+    await ensurePublishQuarterTypesColumn(pool);
+
+    // Parse published quarter types (sent as JSON string from FormData)
+    let quarterTypesStr = null;
+    const rawQTypes = req.body.quarterTypes;
+    if (rawQTypes) {
+      try {
+        const parsed = Array.isArray(rawQTypes) ? rawQTypes : JSON.parse(rawQTypes);
+        quarterTypesStr = parsed.filter(Boolean).join(",") || null;
+      } catch {
+        quarterTypesStr = String(rawQTypes).trim() || null;
+      }
+    }
+
     // Create new publication
     await pool.request()
       .input("fromDate", sql.Date, fromDate)
       .input("toDate", sql.Date, toDate)
+      .input("quarterTypes", sql.NVarChar(sql.MAX), quarterTypesStr)
       .query(`
         INSERT INTO dbo.Publish
         (
           From_Date,
           To_Date,
-          Current_State
+          Current_State,
+          QuarterTypes
         )
         VALUES
         (
           @fromDate,
           @toDate,
-          'Published'
+          'Published',
+          @quarterTypes
         )
       `);
 
@@ -1052,11 +1090,15 @@ router.patch("/applications/:id", async (req, res) => {
   if (!affected) return res.status(404).json({ error: "Not found" });
 
   if (String(status).toLowerCase() === "approved" && String(current.Status || "").toLowerCase() !== "approved") {
-    sendQuarterApprovalEmail({
+    // Build allotment order PDF then send approval email with attachment
+    buildAllotmentOrderPDF({
       ...current,
       Status: status,
+      IssueDate: new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }).replace(/\//g, "/"),
+    }).then((pdfBuffer) => {
+      return sendQuarterApprovalEmail({ ...current, Status: status }, pdfBuffer);
     }).catch((err) => {
-      console.error(`Quarter approval email failed for application ${id}:`, err);
+      console.error(`Quarter approval email/PDF failed for application ${id}:`, err);
     });
   }
 
@@ -1082,6 +1124,171 @@ router.get("/quarter-types", async (req, res) => {
 });
 
 
+
+// ── Allotment Order PDF ────────────────────────────────────────────
+async function buildAllotmentOrderPDF(application) {
+  const LOGO_PATH   = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "Logo.png");
+  const SIG_PATH    = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "signature.png");
+  const logoExists  = fs.existsSync(LOGO_PATH);
+  const sigExists   = fs.existsSync(SIG_PATH);
+
+  const doc    = new PDFDocument({ margin: 40, size: "A4" });
+  const chunks = [];
+  doc.on("data", (c) => chunks.push(c));
+  const ready  = new Promise((res, rej) => { doc.on("end", res); doc.on("error", rej); });
+
+  const empName       = application.EmpName      || "—";
+  const empId         = application.EmpId        || "—";
+  const qtrRequested  = application.QtrRequested || "—";
+  const qtrType       = application.QtrType      || "—";
+  const appNo         = application.AppNo        || "—";
+  const issueDate     = application.IssueDate    || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }).replace(/\//g, "/");
+  const fileNo        = `AD/EST/GENL/QRS/VIII-2/${new Date().getFullYear()}(Pt.)/`;
+
+  const LEFT = 50;
+  const W = 495; // A4 width is 595.28 - 100 = 495
+
+  // ── PAGE 1 Header ──────────────────────────────────────────────────────────
+  if (logoExists) {
+    try { doc.image(LOGO_PATH, doc.page.width / 2 - 20, 25, { width: 40, height: 40 }); } catch (_) {}
+  }
+  
+  // Start text below logo
+  doc.y = 70;
+  
+  doc.font("Helvetica-Bold").fontSize(10)
+    .text("Paradip Port Authority", { align: "center" })
+    .text("ADMINISTRATIVE DEPARTMENT", { align: "center" })
+    .text("(ESTATE WING)", { align: "center" });
+    
+  doc.moveDown(0.5);
+
+  const lineY1 = doc.y;
+  doc.moveTo(LEFT, lineY1).lineTo(LEFT + W, lineY1).strokeColor("#000").lineWidth(0.5).stroke();
+  doc.y += 5;
+
+  const fileNoY = doc.y;
+  doc.font("Helvetica-Bold").fontSize(10.5)
+    .text(`File No.: ${fileNo}`, LEFT, fileNoY, { width: 300, continued: false });
+  doc.text(`Dt: ${issueDate}`, LEFT, fileNoY, { align: "right", width: W });
+  
+  doc.y += 5;
+  const lineY2 = doc.y;
+  doc.moveTo(LEFT, lineY2).lineTo(LEFT + W, lineY2).strokeColor("#000").lineWidth(0.5).stroke();
+  doc.y += 5;
+
+  doc.font("Helvetica-Bold").fontSize(11.5)
+    .text("OFFICE ORDER", LEFT, doc.y, { align: "center", width: W });
+  doc.moveDown(0.5);
+
+  // ── Body ─────────────────────────────────────────────────────────────────
+  const bodyText =
+    `In accordance with the approval of House Allotment Committee held on ${issueDate}, ` +
+    `${empName} (${empId}) is hereby allotted with Qrs.No: ${qtrRequested} (${qtrType}) ` +
+    `in lieu of Qrs.No: MIIR/123 (B TYPE IIIR) on payment of usual house rent and all other ` +
+    `service charges as prescribed from time to time under the following terms and conditions.`;
+
+  // Indent first line like the image
+  doc.font("Helvetica").fontSize(11).text(bodyText, LEFT, doc.y, { align: "justify", width: W, lineGap: 3.5, indent: 30 });
+  doc.moveDown(0.5);
+
+  const para2 =
+    `Occupation and vacation of quarters shall be made in presence of R.I.(Estate) on ` +
+    `production of format duly filled in and certified by the respective D.D.O.s within a ` +
+    `period of 15 (fifteen) days from the date of issue of this order under intimation to the ` +
+    `Sr. Assistant Estate Manager, E.E., P.E.D., E.E., P.H.D. and E.E., R.&B.Divn., Paradip ` +
+    `Port Authority and respective D.D.O.s failing which this order will be stand cancelled. ` +
+    `The allotment is governed under the Paradip Port Authority Employees (Allotment of Qrs.) Orders, 2010.`;
+  doc.font("Helvetica").fontSize(11).text(para2, { align: "justify", width: W, lineGap: 3.5, indent: 30 });
+  doc.moveDown(0.5);
+
+  const para3 =
+    `They should submit their clearances from E.E. P.E.D., P.H.D & R&B Divn., ppa ` +
+    `and vacate their existing quarters by signing in the vacation Register of Estate Wing ` +
+    `within a period of 15 (fifteen) days.`;
+  doc.font("Helvetica").fontSize(11).text(para3, { align: "justify", width: W, lineGap: 3.5, indent: 30 });
+  doc.moveDown(0.8);
+
+  // T&C heading
+  doc.font("Helvetica-Bold").fontSize(11.5)
+    .text("TERMS AND CONDITIONS FOR CANCELLATION OF\nALLOTMENT/IMPOSITION OF PENAL HOUSE RENT", { align: "center", width: W, lineGap: 2 });
+  doc.moveDown(0.5);
+
+  const tcIntro =
+    `If the allottee commits any/all of the following acts the allotment of residence ` +
+    `made to him/her is liable for cancellation/imposition of penal house rent at the rate ` +
+    `of 25% of his/her emoluments for a period of 36 months or both along-with one time ` +
+    `penalty of Rs.2,000.00 (Rupees Two Thousand) only.`;
+  doc.font("Helvetica").fontSize(11).text(tcIntro, { align: "justify", width: W, lineGap: 3.5, indent: 30 });
+  doc.moveDown(0.5);
+
+  // ── Clauses ─────────────────────────────────────────────────────────────────
+  const clauses = [
+    "Transferring of subletting the entire or a portion of the quarters.",
+    "Using the building for a purpose other than residential purpose.",
+    "Addition or alteration to structure or loss or damage to fixtures, fittings and construction of any hutments within the premises.",
+    "In the event of any act or conduct on the part of the allottee or his family members or dependants or the allottee concerned which act or conduct is a nuisance to the occupant of the neighborhood.",
+    "The condition of his/her quarters premises shall be maintained by the allotted in sanitary condition in addition to proper maintenance of the house and hedge and if planted by him at his own cost.",
+    "The allottee shall demolish the hutment if any, in his/her name within seven days from the date of taking over possession of the quarters.",
+    "Cutting of permanent tree within the campus is strictly prohibited.",
+    "If the employees/Officers or any of the family members of the employees/Officers is reported as involved in any criminal activities, the allotment of the quarters will be liable for cancellation.",
+    "After issue of quarters allotment order if the employees/officer is not interested to occupy the quarters for any reason he/she should intimate it to the Sr. AEM, ppa within a period of seven days from the date of receipt of allotment order failing which it will construe of his willingness to occupy such quarters. The rent of quarters will be charged accordingly.",
+    "The allottee cannot keep cattle/pig(s) in the side of quarters.",
+    "Handing over and taking over the Qrs. shall be made within 15 days time from the date of issue of this order or otherwise the allottee shall have to pay the Penal Rent for occupation in both the Qrs.",
+    "The allottee should take occupation of the allotted Qrs. within 15 (fifteen) days of allotment, otherwise the allotment will be cancelled automatically.",
+    "Action of the allottee, if any, comes to the notice of the Port authority which any way hamper/damage the image and reputation of the Port, shall lead to cancellation of allotted quarter(s).",
+    "Unauthenticated news published in any news paper/Print media or circulated if any of the electronic media by the allottee, which ultimately calls in question the reputation of the institution as well as integrity of the person(s) connected/serving under Paradip Port Authority without proper scrutiny of the matter in it right prospective may entail for cancellation.",
+  ];
+
+  clauses.forEach((clause, i) => {
+    const label = `${i + 1}.`;
+    doc.font("Helvetica-Bold").fontSize(11).text(label, { continued: true });
+    doc.font("Helvetica").fontSize(11).text(`    ${clause}`, { align: "justify", lineGap: 3 });
+  });
+
+  // Signature block
+  doc.moveDown(1.5);
+  // Calculate X to center the 90px image over the right-aligned text block
+  const sigBlockX = LEFT + W - 110; 
+  
+  if (sigExists) {
+    try { 
+      doc.image(SIG_PATH, sigBlockX, doc.y, { fit: [90, 60] }); 
+      doc.y += 65; // Push text down below the signature
+    } catch (_) {}
+  } else {
+    doc.moveDown(3);
+  }
+  
+  doc.font("Helvetica-Bold").fontSize(11)
+    .text("Sr. Asst. Estate Manager", { align: "right" })
+    .text("Paradip Port Authority", { align: "right" });
+  doc.moveDown(1.5);
+
+  // Computer generated note
+  doc.font("Helvetica-Bold").fontSize(9)
+    .text("This is a computer generated order, signature not required.", { align: "center" });
+  doc.moveDown(1);
+
+  // Copy to list
+  doc.font("Helvetica-Bold").fontSize(11).text("Copy to:-");
+  const copies = [
+    "Persons concerned through their respective D.D.O.s/Concerned D.D.O.s for information and necessary action.",
+    "The Dy. Conservator(Marine Dept) (HoD), ppa for kind information.",
+    "The E.E., P.H.D./E.E., P.E.D./E.E., R&B Divn., Paradip Port Authority for kind information and necessary action.",
+    "The Dy. Director, EDP Cell, ppa for kind information.",
+    `The Head Asst. / Sr.R.I. / Concerned Zone I/c, Estate Wing, ppa for information and necessary action. The aforesaid Zone-In-charges are hereby instructed to report the status of occupation and vacation of the qrs. as contained in this office order immediately after completion of 15 days from the date of issuance of this order.`,
+    "Office order guard file/Project Associates.IITM.",
+  ];
+  copies.forEach((item, idx) => {
+    doc.font("Helvetica-Bold").fontSize(10.5).text(`${idx + 1}.`, { continued: true });
+    doc.font("Helvetica").fontSize(10.5).text(`    ${item}`, { align: "justify", lineGap: 2.5 });
+  });
+
+  doc.end();
+  await ready;
+  return Buffer.concat(chunks);
+}
 
 async function buildCircularPDF(body) {
   const {

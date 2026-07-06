@@ -103,9 +103,6 @@ function buildQuarterApprovalBody(application) {
         <div style="background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 100%);border-radius:18px 18px 0 0;padding:20px 20px;color:#fff;">
           <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
             <tr>
-              <td style="vertical-align:middle;padding-right:12px;">
-                <img src="cid:ppa-logo" alt="Paradip Port Authority logo" style="display:block;width:56px;height:56px;border-radius:14px;object-fit:cover;background:#fff;" />
-              </td>
               <td style="vertical-align:middle;">
                 <div style="font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0.02em;word-break:break-word;">Paradip Port Authority</div>
                 <div style="margin-top:6px;font-size:11px;line-height:1.2;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;word-break:break-word;">Land Management System</div>
@@ -138,7 +135,7 @@ function buildQuarterApprovalBody(application) {
   return { text: textLines, html };
 }
 
-async function sendQuarterApprovalEmail(application) {
+async function sendQuarterApprovalEmail(application, pdfBuffer = null) {
   const overrideRecipient = env("MAIL_TO_OVERRIDE");
   const recipients = overrideRecipient
     ? uniqEmails([overrideRecipient])
@@ -151,23 +148,28 @@ async function sendQuarterApprovalEmail(application) {
   const subject = `Quarter application approved${application.AppNo ? ` - ${application.AppNo}` : ""}`;
   const body = buildQuarterApprovalBody(application);
 
+  const attachments = [];
+
+  if (pdfBuffer) {
+    attachments.push({
+      filename: `Allotment_Order_${application.AppNo || "Letter"}.pdf`,
+      content: pdfBuffer,
+      contentType: "application/pdf",
+    });
+  }
+
   await transporter.sendMail({
     from: env("MAIL_FROM", env("MAIL_USER")),
     to: recipients.join(", "),
     subject,
     text: body.text,
     html: body.html,
-    attachments: [
-      {
-        filename: "Logo.png",
-        path: LOGO_PATH,
-        cid: "ppa-logo",
-      },
-    ],
+    attachments,
   });
 
   return { recipients };
 }
+
 
 async function sendCircularEmail(emails, file, fromDate, toDate) {
   if (!emails || emails.length === 0) {
@@ -192,9 +194,6 @@ async function sendCircularEmail(emails, file, fromDate, toDate) {
         <div style="background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 100%);border-radius:18px 18px 0 0;padding:20px 20px;color:#fff;">
           <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
             <tr>
-              <td style="vertical-align:middle;padding-right:12px;">
-                <img src="cid:ppa-logo" alt="Paradip Port Authority logo" style="display:block;width:56px;height:56px;border-radius:14px;object-fit:cover;background:#fff;" />
-              </td>
               <td style="vertical-align:middle;">
                 <div style="font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0.02em;word-break:break-word;">Paradip Port Authority</div>
                 <div style="margin-top:6px;font-size:11px;line-height:1.2;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;word-break:break-word;">Land Management System</div>
@@ -227,11 +226,6 @@ async function sendCircularEmail(emails, file, fromDate, toDate) {
     text: textLines,
     html,
     attachments: [
-      {
-        filename: "Logo.png",
-        path: LOGO_PATH,
-        cid: "ppa-logo",
-      },
       ...(file ? [{
         filename: file.originalname,
         path: file.path,
@@ -270,9 +264,6 @@ async function sendCircularEmailWithBuffer(emails, pdfBuffer, circularData) {
         <div style="background:linear-gradient(135deg,#0f172a 0%,#1d4ed8 100%);border-radius:18px 18px 0 0;padding:20px 20px;color:#fff;">
           <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
             <tr>
-              <td style="vertical-align:middle;padding-right:12px;">
-                <img src="cid:ppa-logo" alt="Paradip Port Authority logo" style="display:block;width:56px;height:56px;border-radius:14px;object-fit:cover;background:#fff;" />
-              </td>
               <td style="vertical-align:middle;">
                 <div style="font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0.02em;">Paradip Port Authority</div>
                 <div style="margin-top:6px;font-size:11px;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;">Land Management System</div>
@@ -300,11 +291,6 @@ async function sendCircularEmailWithBuffer(emails, pdfBuffer, circularData) {
     text: textLines,
     html,
     attachments: [
-      {
-        filename: "Logo.png",
-        path: LOGO_PATH,
-        cid: "ppa-logo",
-      },
       {
         filename: `Circular_${new Date().toISOString().slice(0, 10)}.pdf`,
         content: pdfBuffer,
