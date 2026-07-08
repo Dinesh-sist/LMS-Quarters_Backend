@@ -89,6 +89,16 @@ async function ensureQuarterApplicationPriorityColumn(pool) {
   `);
 }
 
+async function ensureQuarterApplicationDepartmentColumn(pool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.Quarter_Applications', 'Department') IS NULL
+    BEGIN
+      ALTER TABLE dbo.Quarter_Applications
+      ADD Department NVARCHAR(200) NULL;
+    END;
+  `);
+}
+
 function normalizeText(value) {
   return String(value || "")
     .toUpperCase()
@@ -285,6 +295,7 @@ router.get("/applications", async (req, res) => {
 router.get("/verify-quarter-applications", async (req, res) => {
   try {
     const pool = await getPool();
+    await ensureQuarterApplicationDepartmentColumn(pool);
     const result = await pool.request().query(`
       SELECT
         qa.[Id],
@@ -301,6 +312,7 @@ router.get("/verify-quarter-applications", async (req, res) => {
         qa.[QtrType],
         qa.[Reason],
         qa.[ExchangeReason],
+        qa.[Department],
         qa.[AttachmentPath],
         qa.[Status],
         qa.[PublishedDateFrom],
@@ -414,6 +426,7 @@ router.post("/checkapprovalsave", async (req, res) => {
       quarterNo = null,
       quarterType = null,
       location = null,
+      department = null,
     } = req.body;
 
     if (!quarterId) {
@@ -462,6 +475,7 @@ router.post("/checkapprovalsave", async (req, res) => {
     await ensureQuarterApplicationPublishColumns(pool);
     await ensureQuarterApplicationRosterColumn(pool);
     await ensureQuarterApplicationPriorityColumn(pool);
+    await ensureQuarterApplicationDepartmentColumn(pool);
     const empResult = await pool
       .request()
       .input("UserId", sql.Int, userId)
@@ -517,26 +531,30 @@ router.post("/checkapprovalsave", async (req, res) => {
     await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
 
     try {
-      const rosterRequest = new sql.Request(tx);
-      const rosterLookup = await rosterRequest
-        .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
-        .query(`
-          DECLARE @RosterNo INT;
+      let rosterNo = null;
 
-          SELECT @RosterNo = (COUNT(*) % 60) + 1
-          FROM dbo.Quarter_Applications WITH (UPDLOCK, HOLDLOCK)
-          WHERE QtrRequested = @QtrRequested;
+      if (reason !== "exchange") {
+        const rosterRequest = new sql.Request(tx);
+        const rosterLookup = await rosterRequest
+          .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
+          .query(`
+            DECLARE @RosterNo INT;
 
-          SELECT @RosterNo AS RosterNo;
-        `);
+            SELECT @RosterNo = (COUNT(*) % 60) + 1
+            FROM dbo.Quarter_Applications WITH (UPDLOCK, HOLDLOCK)
+            WHERE QtrRequested = @QtrRequested AND ISNULL(Reason, '') != 'exchange';
 
-      const rosterNo = Number(rosterLookup.recordset[0]?.RosterNo || 1);
+            SELECT @RosterNo AS RosterNo;
+          `);
 
-      const rosterEligibility = isRosterCasteEligible(casteValue, qtr.QuarterType, rosterNo);
-      if (!rosterEligibility.allowed) {
-        const rosterErr = new Error(rosterEligibility.message || "You cannot apply for this quarter at the current roster number.");
-        rosterErr.statusCode = 400;
-        throw rosterErr;
+        rosterNo = Number(rosterLookup.recordset[0]?.RosterNo || 1);
+
+        const rosterEligibility = isRosterCasteEligible(casteValue, qtr.QuarterType, rosterNo);
+        if (!rosterEligibility.allowed) {
+          const rosterErr = new Error(rosterEligibility.message || "You cannot apply for this quarter at the current roster number.");
+          rosterErr.statusCode = 400;
+          throw rosterErr;
+        }
       }
 
       const insertRequest = new sql.Request(tx);
@@ -557,19 +575,20 @@ router.post("/checkapprovalsave", async (req, res) => {
         .input("RosterNo", sql.Int, rosterNo)
         .input("Reason", sql.NVarChar(100), reason)
         .input("ExchangeReason", sql.NVarChar(400), exchangeReason)
+        .input("Department", sql.NVarChar(200), department)
         .query(`
           INSERT INTO dbo.Quarter_Applications (
             AppNo, UserId, EmpId, EmpName, Class, Caste,
             AllotCatId, EmailId, ReqDate, QtrRequested,
             QtrLocation, QtrType, PublishedDateFrom, PublishedDateTo,
-            RosterNo, Reason, ExchangeReason, Status, CreatedAt, UpdatedAt
+            RosterNo, Reason, ExchangeReason, Department, Status, CreatedAt, UpdatedAt
           )
           OUTPUT INSERTED.Id, INSERTED.AppNo, INSERTED.RosterNo
           VALUES (
             @AppNo, @UserId, @EmpId, @EmpName, @Class, @Caste,
             @AllotCatId, @EmailId, GETDATE(), @QtrRequested,
             @QtrLocation, @QtrType, @PublishedDateFrom, @PublishedDateTo,
-          @RosterNo, @Reason, @ExchangeReason, 'pending', GETDATE(), GETDATE()
+            @RosterNo, @Reason, @ExchangeReason, @Department, 'pending', GETDATE(), GETDATE()
           )
         `);
 
@@ -604,6 +623,7 @@ router.post("/checkapprovalsave", async (req, res) => {
 router.get("/status-of-applications", async (req, res) => {
   const pool = await getPool();
   await ensureQuarterApplicationPriorityColumn(pool);
+  await ensureQuarterApplicationDepartmentColumn(pool);
   await rebuildQuarterApplicationPriorityNumbers(pool);
   const result = await pool.request().query(`
     SELECT
@@ -618,7 +638,7 @@ router.get("/status-of-applications", async (req, res) => {
       CONVERT(varchar(10), ud.DateOfJoining, 23) AS dateOfJoin,
       ud.[Basic] AS basic,
       CONVERT(varchar(10), ud.DateOfBirth, 23) AS dob,
-      '' AS dept,
+      qa.[Department] AS dept,
       qa.[Caste] AS casteId,
       '' AS currentQtr,
       (

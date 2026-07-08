@@ -114,32 +114,35 @@ router.post("/lookup", async (req, res) => {
 
   const pool = await getPool();
 
-  const tables = ["Class1", "Class2", "Class3", "Class4"];
-  let found = null;
-  for (const table of tables) {
-    // eslint-disable-next-line no-await-in-loop
-    found = await tryFindInTable(pool, table, employeeId, dateOfBirth);
-    if (found) break;
+  const result = await pool.request()
+    .input("EmployeeId", sql.NVarChar(50), employeeId)
+    .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
+    .query(`
+      SELECT ud.UserId, ud.EmployeeName, ud.EmpClass, ud.DateOfJoining, u.Username
+      FROM dbo.UserDetails ud
+      INNER JOIN dbo.Users u ON ud.UserId = u.Id
+      WHERE ud.EmployeeId = @EmployeeId AND CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirth
+    `);
+
+  const row = result.recordset?.[0];
+  
+  if (!row) {
+    return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
   }
 
-  if (!found) return res.status(404).json({ error: "Employee not found" });
-
-  const classNo = classFromTableName(found.table);
-  const empClass = classNo
-    ? await findQuarterEmpClass(pool, { classNo, type: found.row?.Type })
-    : null;
+  if (row.Username && row.Username.includes('@')) {
+    return res.status(409).json({ error: "You are already registered! Please login." });
+  }
 
   return res.json({
-    employeeId: found.row.EMP_NO,
-    employeeName: found.row.EMP_NM,
-    dateOfBirth: new Date(found.row.BIRTH_DT).toISOString().slice(0, 10),
-    dateOfJoining: found.row.JOIN_DT
-      ? new Date(found.row.JOIN_DT).toISOString().slice(0, 10)
+    employeeId: employeeId,
+    employeeName: row.EmployeeName,
+    dateOfBirth: dateOfBirth,
+    dateOfJoining: row.DateOfJoining
+      ? new Date(row.DateOfJoining).toISOString().slice(0, 10)
       : "",
-    classTable: found.table,
-    type: found.row?.Type ?? "",
-    className: empClass?.Class || "",
-    classChoice: empClass?.Class || empClass?.class_name || "",
+    className: row.EmpClass || "",
+    classChoice: row.EmpClass || "",
   });
 });
 

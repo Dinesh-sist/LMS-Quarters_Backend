@@ -23,11 +23,11 @@ module.exports = {
   allowedOrigins, // ✅ just reference the variable
   db: {
 
-    server: env("DB_SERVER", "localhost"),  
+    server: env("DB_SERVER", "localhost"),
     port: Number(env("DB_PORT", "1433")),
     database: env("DB_DATABASE", "LMSQuartersNew"),
     user: env("DB_USER", "Dhinesh"),
-    password: env("DB_PASSWORD", "dhinesh1714"),
+    password: env("DB_PASSWORD", "Dhinesh1714"),
     encrypt: envBool("DB_ENCRYPT", false),
     trustServerCertificate: envBool("DB_TRUST_SERVER_CERT", true)
   }
