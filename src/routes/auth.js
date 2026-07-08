@@ -115,28 +115,35 @@ END
 
   if (exists.recordset[0]) return res.status(409).json({ error: "Email already registered" });
 
+  const empCheck = await pool
+    .request()
+    .input("EmployeeId", sql.NVarChar(50), employeeId)
+    .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
+    .query("SELECT TOP 1 UserId FROM dbo.UserDetails WHERE EmployeeId=@EmployeeId AND CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirth");
+
+  const userId = empCheck.recordset[0]?.UserId;
+  if (!userId) {
+    return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
+  }
+
   const tx = new sql.Transaction(pool);
   await tx.begin();
   try {
-    const userInsert = await new sql.Request(tx)
+    await new sql.Request(tx)
+      .input("Id", sql.Int, userId)
       .input("Username", sql.NVarChar(64), username)
       .input("PasswordHash", sql.NVarChar(255), passwordHash)
-      .input("Role", sql.NVarChar(32), "employee")
-      .query("INSERT INTO dbo.Users (Username, PasswordHash, Role) OUTPUT INSERTED.Id VALUES (@Username, @PasswordHash, @Role)");
-
-    const userId = userInsert.recordset[0]?.Id;
+      .query("UPDATE dbo.Users SET Username=@Username, PasswordHash=@PasswordHash WHERE Id=@Id");
 
     await new sql.Request(tx)
       .input("UserId", sql.Int, userId)
-      .input("EmployeeId", sql.NVarChar(50), employeeId)
-      .input("DateOfBirth", sql.Date, new Date(dateOfBirth))
       .input("EmployeeName", sql.NVarChar(120), employeeName)
       .input("DateOfJoining", sql.Date, new Date(dateOfJoining))
       .input("EmpClass", sql.NVarChar(60), className)
       .input("Mobile", sql.NVarChar(20), mobile)
       .input("Email", sql.NVarChar(120), email)
       .query(
-        "INSERT INTO dbo.UserDetails (UserId, EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, EmpClass, Mobile, Email) VALUES (@UserId, @EmployeeId, @DateOfBirth, @EmployeeName, @DateOfJoining, @EmpClass, @Mobile, @Email)"
+        "UPDATE dbo.UserDetails SET EmployeeName=@EmployeeName, DateOfJoining=@DateOfJoining, EmpClass=@EmpClass, Mobile=@Mobile, Email=@Email WHERE UserId=@UserId"
       );
 
     await tx.commit();
@@ -145,7 +152,7 @@ END
     throw err;
   }
 
-  return res.status(201).json({ ok: true });
+  return res.status(200).json({ ok: true });
 });
 
 module.exports = router;
