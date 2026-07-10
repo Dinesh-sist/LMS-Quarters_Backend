@@ -99,3 +99,11 @@ router.post("/employee-classes/update", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+

@@ -5,10 +5,10 @@ const { requireAuth } = require("../middleware/auth");
 const router = express.Router();
 
 router.get("/vacant", requireAuth, async (req, res) => {
-  const { classId } = req.query;
+  const { className } = req.query;
 
-  if (!classId) {
-    return res.status(400).json({ error: "classId is required" });
+  if (!className || !className.trim()) {
+    return res.status(400).json({ error: "className is required" });
   }
 
   try {
@@ -35,12 +35,12 @@ router.get("/vacant", requireAuth, async (req, res) => {
 
     const result = await pool
       .request()
-      .input("ClassId", sql.Int, parseInt(classId))
+      .input("ClassName", sql.NVarChar(60), className.trim())
       .input("QuarterTypes", sql.NVarChar(sql.MAX), quarterTypesParam)
       .input("UserId", sql.Int, Number(req.user.sub))
       .query(`
         SELECT
-            CAST(eq.OBJECTID AS INT)                   AS Id,
+            CAST(FLOOR(eq.OBJECTID) AS BIGINT)             AS Id,
             CAST(eq.CATEGORY AS NVARCHAR(64))          AS QuarterType,
             CAST(eq.AREA_TYPE AS NVARCHAR(64))         AS Location,
             CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))  AS QuarterNo,
@@ -62,7 +62,7 @@ router.get("/vacant", requireAuth, async (req, res) => {
                 FROM dbo.[Quarter_Emp_Class] qec
                 JOIN dbo.[Quarter_Allotment_Type] qat
                     ON qat.QTR_ID = qec.QTR_ID
-                WHERE qec.Class_ID = @ClassId
+                WHERE UPPER(LTRIM(RTRIM(qec.[Class]))) = UPPER(LTRIM(RTRIM(@ClassName)))
             )
             AND (
               @QuarterTypes IS NULL
