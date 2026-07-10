@@ -320,13 +320,76 @@ router.get("/verify-quarter-applications", async (req, res) => {
         ud.[Basic] AS Basic,
         CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
         CONVERT(varchar(10), ud.GradDate, 23) AS GradDate,
+        CONVERT(varchar(10), ud.DateOfBirth, 23) AS DateOfBirth,
+        ud.[area_type] AS CurrentAreaType,
+        ud.[Quarter_no] AS CurrentQuarterNo,
+        ud.[Category] AS CurrentQuarterType,
         CONVERT(varchar(19), qa.[CreatedAt], 120)  AS CreatedAt,
         CONVERT(varchar(19), qa.[UpdatedAt], 120)  AS UpdatedAt
       FROM dbo.Quarter_Applications qa
       LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
       ORDER BY qa.[Id] DESC
     `);
-    return res.json({ items: result.recordset });
+    const getClassRank = (cls) => {
+      const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
+      if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
+      if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
+      if (norm.includes("CLASSII") || norm === "CLASS2" || norm === "2") return 3;
+      if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
+      if (norm.includes("CLASSIV") || norm === "CLASS4" || norm === "4") return 5;
+      if (norm.includes("CLASSI") || norm === "CLASS1" || norm === "1") return 1.5;
+      return 99;
+    };
+
+    const sortedItems = [...(result.recordset || [])].sort((a, b) => {
+      // 1. Group by Requested Quarter Number (competing applications group together)
+      const qtrA = String(a.QtrRequested || "").trim();
+      const qtrB = String(b.QtrRequested || "").trim();
+      if (qtrA !== qtrB) {
+        if (!qtrA) return 1;
+        if (!qtrB) return -1;
+        return qtrA.localeCompare(qtrB, undefined, { numeric: true });
+      }
+
+      // 2. Class Priority (1st: SR-CLASS-I, 2nd: JR-CLASS-I, 3rd: CLASS-II, 4th: CLASS-III, 5th: CLASS-IV)
+      const rankA = getClassRank(a.Class);
+      const rankB = getClassRank(b.Class);
+      if (rankA !== rankB) return rankA - rankB;
+
+      // 3. Graduation Date (earlier first)
+      const gradA = toTimeOrNull(a.GradDate);
+      const gradB = toTimeOrNull(b.GradDate);
+      const gradDiff = compareNullableNumber(gradA, gradB);
+      if (gradDiff !== 0) return gradDiff;
+
+      // 4. Date of Joining (earlier first)
+      const dojA = toTimeOrNull(a.DateOfJoining);
+      const dojB = toTimeOrNull(b.DateOfJoining);
+      const dojDiff = compareNullableNumber(dojA, dojB);
+      if (dojDiff !== 0) return dojDiff;
+
+      // 5. Basic Pay (higher first)
+      const basicA = Number(a.Basic || 0);
+      const basicB = Number(b.Basic || 0);
+      if (basicA !== basicB) return basicB - basicA;
+
+      // 6. Date of Birth (earlier/older first)
+      const dobA = toTimeOrNull(a.DateOfBirth);
+      const dobB = toTimeOrNull(b.DateOfBirth);
+      const dobDiff = compareNullableNumber(dobA, dobB);
+      if (dobDiff !== 0) return dobDiff;
+
+      // 7. Request Date (earlier first)
+      const reqA = toTimeOrNull(a.ReqDate);
+      const reqB = toTimeOrNull(b.ReqDate);
+      const reqDiff = compareNullableNumber(reqA, reqB);
+      if (reqDiff !== 0) return reqDiff;
+
+      // 8. ID Fallback
+      return Number(a.Id) - Number(b.Id);
+    });
+
+    return res.json({ items: sortedItems });
   } catch (err) {
     console.error("verify-quarter-applications error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -548,13 +611,6 @@ router.post("/checkapprovalsave", async (req, res) => {
           `);
 
         rosterNo = Number(rosterLookup.recordset[0]?.RosterNo || 1);
-
-        const rosterEligibility = isRosterCasteEligible(casteValue, qtr.QuarterType, rosterNo);
-        if (!rosterEligibility.allowed) {
-          const rosterErr = new Error(rosterEligibility.message || "You cannot apply for this quarter at the current roster number.");
-          rosterErr.statusCode = 400;
-          throw rosterErr;
-        }
       }
 
       const insertRequest = new sql.Request(tx);
@@ -621,48 +677,7 @@ router.post("/checkapprovalsave", async (req, res) => {
 });
 
 router.get("/status-of-applications", async (req, res) => {
-  const pool = await getPool();
-  await ensureQuarterApplicationPriorityColumn(pool);
-  await ensureQuarterApplicationDepartmentColumn(pool);
-  await rebuildQuarterApplicationPriorityNumbers(pool);
-  const result = await pool.request().query(`
-    SELECT
-      qa.[PriorityNo] AS priorityNo,
-      qa.[Id] AS id,
-      qa.[UserId] AS userId,
-      qa.[AppNo] AS appNo,
-      qa.[EmpId] AS empId,
-      qa.[EmpName] AS empName,
-      qa.[Class] AS class,
-      CONVERT(varchar(10), ud.GradDate, 23) AS gradDate,
-      CONVERT(varchar(10), ud.DateOfJoining, 23) AS dateOfJoin,
-      ud.[Basic] AS basic,
-      CONVERT(varchar(10), ud.DateOfBirth, 23) AS dob,
-      qa.[Department] AS dept,
-      qa.[Caste] AS casteId,
-      '' AS currentQtr,
-      (
-        SELECT TOP 1 qa2.[QtrType]
-        FROM dbo.Quarter_Applications qa2
-        WHERE qa2.[UserId] = qa.[UserId]
-          AND LOWER(qa2.[Status]) = 'approved'
-        ORDER BY qa2.[Id] DESC
-      ) AS currentQtyType,
-      qa.[QtrRequested] AS reqQtr,
-      qa.[QtrLocation] AS reqQtrLocation,
-      qa.[QtrType] AS reqQtrType,
-      qa.[PublishedDateFrom] AS publishedDateFrom,
-      qa.[PublishedDateTo] AS publishedDateTo,
-      qa.[ExchangeReason] AS exchange,
-      qa.[AttachmentPath] AS proofFile,
-      CONVERT(varchar(10), qa.[ReqDate], 23) AS reqDate,
-      qa.[RosterNo] AS rosterNo,
-      qa.[Status] AS result
-    FROM dbo.Quarter_Applications qa
-    LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
-    ORDER BY qa.[Id] DESC
-  `);
-  return res.json({ items: result.recordset });
+  return res.json({ items: [] });
 });
 
 async function ensureUserDetailsDebarredColumns(pool) {
@@ -1147,40 +1162,40 @@ router.get("/quarter-types", async (req, res) => {
 
 // ── Allotment Order PDF ────────────────────────────────────────────
 async function buildAllotmentOrderPDF(application) {
-  const LOGO_PATH   = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "Logo.png");
-  const SIG_PATH    = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "signature.png");
-  const logoExists  = fs.existsSync(LOGO_PATH);
-  const sigExists   = fs.existsSync(SIG_PATH);
+  const LOGO_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "Logo.png");
+  const SIG_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "signature.png");
+  const logoExists = fs.existsSync(LOGO_PATH);
+  const sigExists = fs.existsSync(SIG_PATH);
 
-  const doc    = new PDFDocument({ margin: 40, size: "A4" });
+  const doc = new PDFDocument({ margin: 40, size: "A4" });
   const chunks = [];
   doc.on("data", (c) => chunks.push(c));
-  const ready  = new Promise((res, rej) => { doc.on("end", res); doc.on("error", rej); });
+  const ready = new Promise((res, rej) => { doc.on("end", res); doc.on("error", rej); });
 
-  const empName       = application.EmpName      || "—";
-  const empId         = application.EmpId        || "—";
-  const qtrRequested  = application.QtrRequested || "—";
-  const qtrType       = application.QtrType      || "—";
-  const appNo         = application.AppNo        || "—";
-  const issueDate     = application.IssueDate    || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }).replace(/\//g, "/");
-  const fileNo        = `AD/EST/GENL/QRS/VIII-2/${new Date().getFullYear()}(Pt.)/`;
+  const empName = application.EmpName || "—";
+  const empId = application.EmpId || "—";
+  const qtrRequested = application.QtrRequested || "—";
+  const qtrType = application.QtrType || "—";
+  const appNo = application.AppNo || "—";
+  const issueDate = application.IssueDate || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }).replace(/\//g, "/");
+  const fileNo = `AD/EST/GENL/QRS/VIII-2/${new Date().getFullYear()}(Pt.)/`;
 
   const LEFT = 50;
   const W = 495; // A4 width is 595.28 - 100 = 495
 
   // ── PAGE 1 Header ──────────────────────────────────────────────────────────
   if (logoExists) {
-    try { doc.image(LOGO_PATH, doc.page.width / 2 - 20, 25, { width: 40, height: 40 }); } catch (_) {}
+    try { doc.image(LOGO_PATH, doc.page.width / 2 - 20, 25, { width: 40, height: 40 }); } catch (_) { }
   }
-  
+
   // Start text below logo
   doc.y = 70;
-  
+
   doc.font("Helvetica-Bold").fontSize(10)
     .text("Paradip Port Authority", { align: "center" })
     .text("ADMINISTRATIVE DEPARTMENT", { align: "center" })
     .text("(ESTATE WING)", { align: "center" });
-    
+
   doc.moveDown(0.5);
 
   const lineY1 = doc.y;
@@ -1191,7 +1206,7 @@ async function buildAllotmentOrderPDF(application) {
   doc.font("Helvetica-Bold").fontSize(10.5)
     .text(`File No.: ${fileNo}`, LEFT, fileNoY, { width: 300, continued: false });
   doc.text(`Dt: ${issueDate}`, LEFT, fileNoY, { align: "right", width: W });
-  
+
   doc.y += 5;
   const lineY2 = doc.y;
   doc.moveTo(LEFT, lineY2).lineTo(LEFT + W, lineY2).strokeColor("#000").lineWidth(0.5).stroke();
@@ -1269,17 +1284,17 @@ async function buildAllotmentOrderPDF(application) {
   // Signature block
   doc.moveDown(1.5);
   // Calculate X to center the 90px image over the right-aligned text block
-  const sigBlockX = LEFT + W - 110; 
-  
+  const sigBlockX = LEFT + W - 110;
+
   if (sigExists) {
-    try { 
-      doc.image(SIG_PATH, sigBlockX, doc.y, { fit: [90, 60] }); 
+    try {
+      doc.image(SIG_PATH, sigBlockX, doc.y, { fit: [90, 60] });
       doc.y += 65; // Push text down below the signature
-    } catch (_) {}
+    } catch (_) { }
   } else {
     doc.moveDown(3);
   }
-  
+
   doc.font("Helvetica-Bold").fontSize(11)
     .text("Sr. Asst. Estate Manager", { align: "right" })
     .text("Paradip Port Authority", { align: "right" });

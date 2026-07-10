@@ -157,20 +157,15 @@ router.get("/me", requireAuth, async (req, res) => {
     .request()
     .input("UserId", sql.Int, userId)
     .query(
-      "SELECT EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, GradDate, EmpClass, Mobile, Email, DPT_NM AS Department, Category, DebarredFromDate, DebarredToDate FROM dbo.UserDetails WHERE UserId=@UserId"
+      "SELECT EmployeeId, DateOfBirth, EmployeeName, DateOfJoining, GradDate, EmpClass, Mobile, Email, DPT_NM AS Department, Category, DebarredFromDate, DebarredToDate, area_type, Quarter_no FROM dbo.UserDetails WHERE UserId=@UserId"
     );
 
   const row = details.recordset?.[0];
   if (!row) return res.status(404).json({ error: "User details not found" });
 
   const className = String(row.EmpClass || "").trim();
-  const classLookup = await pool
-    .request()
-    .input("ClassName", sql.NVarChar(60), `%${className}%`)
-    .query(
-      "SELECT TOP 1 Class_ID FROM dbo.Quarter_Emp_Class WHERE UPPER(Class) LIKE UPPER(@ClassName) OR UPPER(class_name) LIKE UPPER(@ClassName) ORDER BY Class_PRIORITY ASC"
-    );
-  const classId = classLookup.recordset?.[0]?.Class_ID ?? null;
+  // No single-class-ID lookup needed — classOfEmployee is passed directly to the vacant endpoint
+  // so ALL quarter types for that class are fetched (not just one).
 
   // Try to find Type and Caste from legacy tables if they exist
   let type = "";
@@ -221,11 +216,12 @@ router.get("/me", requireAuth, async (req, res) => {
     type: type,
     classOfEmployee: row.EmpClass || "",
     casteOfEmployee: casteOfEmployee,
-    classId: classId,
     category: row.Category || "",
     department: row.Department || "",
     debarredFromDate: formatDebarredFromDate,
     debarredToDate: formatDebarredToDate,
+    areaType: row.area_type || "",
+    quarterNo: row.Quarter_no || "",
   });
 });
 
