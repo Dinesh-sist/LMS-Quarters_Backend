@@ -1465,20 +1465,79 @@ router.patch("/applications/:id", async (req, res) => {
   return res.json({ ok: true });
 });
 
-// ── GET /api/admin/quarter-types — distinct categories from UserDetails ────────
+// ── GET /api/admin/quarter-types — distinct categories from Estate_Quarters ────
 router.get("/quarter-types", async (req, res) => {
   try {
     const pool = await getPool();
     const result = await pool.request().query(`
-      SELECT DISTINCT LTRIM(RTRIM(CAST(Category AS NVARCHAR(100)))) AS QuarterType
-      FROM dbo.UserDetails
-      WHERE Category IS NOT NULL AND LTRIM(RTRIM(CAST(Category AS NVARCHAR(100)))) <> ''
+      SELECT DISTINCT LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(100)))) AS QuarterType
+      FROM dbo.[Estate_Quarters]
+      WHERE CATEGORY IS NOT NULL 
+        AND LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(100)))) <> ''
+        AND LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(100)))) <> '.'
       ORDER BY QuarterType ASC
     `);
     const types = result.recordset.map((r) => r.QuarterType);
     return res.json({ types });
   } catch (err) {
     console.error("quarter-types error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── GET /api/admin/area-types — distinct areas by quarter type(s) ──────────────
+router.get("/area-types", async (req, res) => {
+  const { quarterType, quarterTypes } = req.query;
+  const targetTypes = quarterTypes || quarterType;
+  if (!targetTypes) return res.status(400).json({ error: "quarterType(s) is required" });
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("QuarterTypes", sql.NVarChar(sql.MAX), targetTypes)
+      .query(`
+        SELECT DISTINCT LTRIM(RTRIM(CAST(AREA_TYPE AS NVARCHAR(100)))) AS AreaType
+        FROM dbo.[Estate_Quarters]
+        WHERE CATEGORY IN (SELECT value FROM STRING_SPLIT(@QuarterTypes, ','))
+          AND AREA_TYPE IS NOT NULL 
+          AND LTRIM(RTRIM(CAST(AREA_TYPE AS NVARCHAR(100)))) <> ''
+        ORDER BY AreaType ASC
+      `);
+    const areas = result.recordset.map((r) => r.AreaType);
+    return res.json({ areas });
+  } catch (err) {
+    console.error("area-types error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── GET /api/admin/quarter-numbers — distinct numbers by type(s) and area(s) ─────
+router.get("/quarter-numbers", async (req, res) => {
+  const { quarterType, quarterTypes, areaType, areaTypes } = req.query;
+  const targetTypes = quarterTypes || quarterType;
+  const targetAreas = areaTypes || areaType;
+  if (!targetTypes || !targetAreas) {
+    return res.status(400).json({ error: "quarterType(s) and areaType(s) are required" });
+  }
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("QuarterTypes", sql.NVarChar(sql.MAX), targetTypes)
+      .input("AreaTypes", sql.NVarChar(sql.MAX), targetAreas)
+      .query(`
+        SELECT DISTINCT LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(100)))) AS QuarterNo
+        FROM dbo.[Estate_Quarters]
+        WHERE CATEGORY IN (SELECT value FROM STRING_SPLIT(@QuarterTypes, ','))
+          AND AREA_TYPE IN (SELECT value FROM STRING_SPLIT(@AreaTypes, ','))
+          AND [QUARTER NUMBER] IS NOT NULL
+          AND LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(100)))) <> ''
+        ORDER BY QuarterNo ASC
+      `);
+    const numbers = result.recordset.map((r) => r.QuarterNo);
+    return res.json({ numbers });
+  } catch (err) {
+    console.error("quarter-numbers error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -1655,6 +1714,11 @@ async function buildCircularPDF(body) {
     circularNo,
     circularDate,
     quarterTypes,
+    quarterType,
+    areaType,
+    areaTypes,
+    quarterNo,
+    quarterNos,
     appFromDate,
     appToDate,
     closingTime,
@@ -1737,11 +1801,22 @@ async function buildCircularPDF(body) {
   doc.moveDown(1.5);
 
   // ── Body ─────────────────────────────────────────────────────────────────
-  const qtyStr = Array.isArray(quarterTypes) ? quarterTypes.join(", ") : (quarterTypes || "______");
+  let targetQuartersStr = "";
+  if (quarterNos && Array.isArray(quarterNos) && quarterNos.length > 0 && quarterTypes && Array.isArray(quarterTypes) && quarterTypes.length > 0 && areaTypes && Array.isArray(areaTypes) && areaTypes.length > 0) {
+    targetQuartersStr = `Quarter No(s). ${quarterNos.join(", ")} of Type(s) ${quarterTypes.join(", ")} in Area(s) ${areaTypes.join(", ")}`;
+  } else if (quarterNos && Array.isArray(quarterNos) && quarterNos.length > 0 && quarterType && areaType) {
+    targetQuartersStr = `Quarter No(s). ${quarterNos.join(", ")} (Type: ${quarterType}, Area: ${areaType})`;
+  } else if (quarterNo && quarterType && areaType) {
+    targetQuartersStr = `Quarter No. ${quarterNo} (Type: ${quarterType}, Area: ${areaType})`;
+  } else {
+    const qtyStr = Array.isArray(quarterTypes) ? quarterTypes.join(", ") : (quarterTypes || "______");
+    targetQuartersStr = `${qtyStr} quarters`;
+  }
+
   doc.font("Helvetica").fontSize(11)
     .text(
       `The Officers/employees are requested to submit their application for allotment of ` +
-      `${qtyStr} quarters on online Web Based GIS Software from ` +
+      `${targetQuartersStr} on online Web Based GIS Software from ` +
       `${appFromDate || "______"} to ${appToDate || "______"} by ${formattedOpeningTime}. ` +
       `After completion of the scheduled date and time the application submitted for allotment of ` +
       `quarters will not be entertained.`,
