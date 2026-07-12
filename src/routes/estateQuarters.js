@@ -118,6 +118,7 @@ router.get("/total-count", requireAuth, async (req, res) => {
   WHERE NULLIF(LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(MAX)))), '') IS NOT NULL
 `);
 
+
     return res.json({
       total: result.recordset[0]?.total || 0,
     });
@@ -137,6 +138,8 @@ router.get("/status-counts", requireAuth, async (req, res) => {
         SUM(CASE WHEN UPPER(LTRIM(RTRIM(CAST([STATUS1] AS NVARCHAR(100))))) = 'BEYOND REPAIR' THEN 1 ELSE 0 END) AS beyondRepair
       FROM dbo.[Estate_Quarters]
     `);
+
+
 
     const row = result.recordset[0] || {};
 
@@ -423,3 +426,54 @@ router.post("/update-status", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
