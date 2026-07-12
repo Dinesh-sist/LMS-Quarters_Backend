@@ -150,19 +150,100 @@ router.get("/status-counts", requireAuth, async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
-router.get("/areas", requireAuth, async (req, res) => {
+router.get("/categories", requireAuth, async (req, res) => {
   try {
     const pool = await getPool();
     const result = await pool.request().query(`
+      SELECT DISTINCT CAST(CATEGORY AS NVARCHAR(64)) AS Category
+      FROM dbo.[Estate_Quarters]
+      WHERE CATEGORY IS NOT NULL AND LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(64)))) != ''
+      ORDER BY Category
+    `);
+    const categories = result.recordset.map((r) => r.Category);
+    return res.json({ categories });
+  } catch (err) {
+    console.error("Error fetching categories:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.get("/areas", requireAuth, async (req, res) => {
+  const { category } = req.query;
+  try {
+    const pool = await getPool();
+    let query = `
       SELECT DISTINCT CAST(AREA_TYPE AS NVARCHAR(64)) AS AreaType
       FROM dbo.[Estate_Quarters]
       WHERE AREA_TYPE IS NOT NULL AND LTRIM(RTRIM(CAST(AREA_TYPE AS NVARCHAR(64)))) != ''
-      ORDER BY AreaType
-    `);
+    `;
+    if (category) {
+      query += ` AND CAST(CATEGORY AS NVARCHAR(64)) = @Category`;
+    }
+    query += ` ORDER BY AreaType`;
+
+    const request = pool.request();
+    if (category) {
+      request.input("Category", sql.NVarChar(64), category);
+    }
+    
+    const result = await request.query(query);
     const areas = result.recordset.map((r) => r.AreaType);
     return res.json({ areas });
   } catch (err) {
     console.error("Error fetching areas:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.get("/employee-lookup/:employeeId", requireAuth, async (req, res) => {
+  const { employeeId } = req.params;
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("employeeId", sql.NVarChar(64), employeeId)
+      .query(`
+        SELECT EmployeeName, EmpClass, Category, Area_type, Quarter_no
+        FROM dbo.UserDetails
+        WHERE EmployeeId = @employeeId
+      `);
+      
+    if (result.recordset.length === 0) {
+      return res.json({ exists: false });
+    }
+    
+    const userDetailsData = result.recordset[0];
+    
+    const estateResult = await pool
+      .request()
+      .input("employeeId", sql.NVarChar(64), employeeId)
+      .query(`
+        SELECT CAST(CATEGORY AS NVARCHAR(64)) AS CATEGORY, 
+               CAST(AREA_TYPE AS NVARCHAR(64)) AS AREA_TYPE, 
+               CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QUARTER_NUMBER
+        FROM dbo.[Estate_Quarters]
+        WHERE EMP_OTH = @employeeId
+      `);
+
+    const estateData = estateResult.recordset.length > 0 ? estateResult.recordset[0] : null;
+
+    return res.json({
+      exists: true,
+      name: userDetailsData.EmployeeName,
+      empClass: userDetailsData.EmpClass,
+      userDetailsQuarter: {
+        category: userDetailsData.Category,
+        areaType: userDetailsData.Area_type,
+        quarterNo: userDetailsData.Quarter_no
+      },
+      estateQuarter: estateData ? {
+        category: estateData.CATEGORY,
+        areaType: estateData.AREA_TYPE,
+        quarterNo: estateData.QUARTER_NUMBER
+      } : null
+    });
+  } catch (err) {
+    console.error("Error looking up employee:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -207,18 +288,40 @@ router.get("/current-status", requireAuth, async (req, res) => {
       .input("p_Area", sql.NVarChar(64), area)
       .input("p_QuarterNo", sql.NVarChar(64), quarterNumber)
       .query(`
-        SELECT TOP 1 CAST(STATUS1 AS NVARCHAR(64)) AS Status
-        FROM dbo.[Estate_Quarters]
-        WHERE CAST(AREA_TYPE AS NVARCHAR(64)) = @p_Area
-          AND CAST([QUARTER NUMBER] AS NVARCHAR(64)) = @p_QuarterNo
+        SELECT TOP 1 
+          CAST(eq.STATUS1 AS NVARCHAR(64)) AS Status,
+          CAST(eq.NAME AS NVARCHAR(255)) AS EmployeeName,
+          CAST(eq.EMP_OTH AS NVARCHAR(64)) AS EmployeeId,
+          CAST(ud.EmpClass AS NVARCHAR(64)) AS EmployeeClass,
+          CAST(eq.[ALLOTMENT ORDER] AS NVARCHAR(255)) AS AllotmentId,
+          eq.ALT_DT AS AllotmentDate
+        FROM dbo.[Estate_Quarters] eq
+        LEFT JOIN dbo.UserDetails ud 
+          ON CAST(eq.EMP_OTH AS NVARCHAR(64)) = CAST(ud.EmployeeId AS NVARCHAR(64))
+        WHERE CAST(eq.AREA_TYPE AS NVARCHAR(64)) = @p_Area
+          AND CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64)) = @p_QuarterNo
       `);
 
     if (result.recordset.length === 0) {
       return res.status(404).json({ error: "Quarter not found" });
     }
 
-    const rawStatus = result.recordset[0]?.Status || "";
-    return res.json({ status: rawStatus });
+    const record = result.recordset[0];
+    let parsedDate = "";
+    if (record.AllotmentDate) {
+      const d = new Date(record.AllotmentDate);
+      if (!isNaN(d.getTime())) {
+        parsedDate = d.toISOString().split('T')[0];
+      }
+    }
+    return res.json({ 
+      status: record.Status || "",
+      employeeName: record.EmployeeName || "",
+      employeeId: record.EmployeeId || "",
+      employeeClass: record.EmployeeClass || "",
+      allotmentId: record.AllotmentId || "",
+      allotmentDate: parsedDate
+    });
   } catch (err) {
     console.error("Error fetching current quarter status:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -226,28 +329,91 @@ router.get("/current-status", requireAuth, async (req, res) => {
 });
 
 router.post("/update-status", requireAuth, async (req, res) => {
-  const { area, quarterNumber, status } = req.body;
+  const { area, quarterNumber, status, employeeId, employeeName, employeeClass, allotmentId, allotmentDate } = req.body;
   if (!area || !quarterNumber || !status) {
     return res.status(400).json({ error: "area, quarterNumber, and status are required" });
   }
 
   try {
     const pool = await getPool();
+
+    const currentQtrRes = await pool
+      .request()
+      .input("p_Area_Lookup", sql.NVarChar(64), area)
+      .input("p_QuarterNo_Lookup", sql.NVarChar(64), quarterNumber)
+      .query(`
+        SELECT EMP_OTH, CAST(CATEGORY AS NVARCHAR(64)) AS CATEGORY
+        FROM dbo.[Estate_Quarters]
+        WHERE CAST(AREA_TYPE AS NVARCHAR(64)) = @p_Area_Lookup
+          AND CAST([QUARTER NUMBER] AS NVARCHAR(64)) = @p_QuarterNo_Lookup
+      `);
+      
+    if (currentQtrRes.recordset.length === 0) {
+      return res.status(404).json({ error: "Quarter not found with given area and number" });
+    }
+    
+    const existingEmpOth = currentQtrRes.recordset[0].EMP_OTH;
+    const targetCategory = currentQtrRes.recordset[0].CATEGORY;
+    
+    if (status.toUpperCase() !== 'OCCUPIED' && existingEmpOth) {
+      await pool
+        .request()
+        .input("existingEmpOth", sql.NVarChar(255), existingEmpOth)
+        .query(`
+          UPDATE dbo.UserDetails 
+          SET Category = NULL, Area_type = NULL, Quarter_no = NULL 
+          WHERE EmployeeId = @existingEmpOth
+        `);
+    }
+
+    if (status.toUpperCase() === 'OCCUPIED' && employeeId) {
+      // Find and clear any other quarter currently assigned to this employee
+      await pool
+        .request()
+        .input("employeeId", sql.NVarChar(64), employeeId)
+        .input("targetArea", sql.NVarChar(64), area)
+        .input("targetQuarterNo", sql.NVarChar(64), quarterNumber)
+        .query(`
+          UPDATE dbo.[Estate_Quarters]
+          SET STATUS1 = 'VACANT', NAME = NULL, EMP_OTH = NULL, [ALLOTMENT ORDER] = NULL, ALT_DT = NULL
+          WHERE EMP_OTH = @employeeId 
+            AND (CAST(AREA_TYPE AS NVARCHAR(64)) != @targetArea OR CAST([QUARTER NUMBER] AS NVARCHAR(64)) != @targetQuarterNo)
+        `);
+
+      // Update UserDetails for this employee with the new quarter details
+      await pool
+        .request()
+        .input("employeeId", sql.NVarChar(64), employeeId)
+        .input("targetCategory", sql.NVarChar(64), targetCategory || null)
+        .input("targetArea", sql.NVarChar(64), area)
+        .input("targetQuarterNo", sql.NVarChar(64), quarterNumber)
+        .query(`
+          UPDATE dbo.UserDetails 
+          SET Category = @targetCategory, Area_type = @targetArea, Quarter_no = @targetQuarterNo 
+          WHERE EmployeeId = @employeeId
+        `);
+    }
+
     const result = await pool
       .request()
       .input("p_Area", sql.NVarChar(64), area)
       .input("p_QuarterNo", sql.NVarChar(64), quarterNumber)
       .input("p_Status", sql.NVarChar(32), status)
+      .input("p_EmployeeName", sql.NVarChar(255), employeeName || null)
+      .input("p_EmployeeId", sql.NVarChar(64), employeeId || null)
+      .input("p_AllotmentId", sql.NVarChar(255), allotmentId || null)
+      .input("p_AllotmentDate", sql.Date, allotmentDate || null)
       .query(`
         UPDATE dbo.[Estate_Quarters]
-        SET STATUS1 = @p_Status
+        SET 
+          STATUS1 = @p_Status,
+          NAME = CASE WHEN UPPER(LTRIM(RTRIM(@p_Status))) != 'OCCUPIED' THEN NULL ELSE @p_EmployeeName END,
+          EMP_OTH = CASE WHEN UPPER(LTRIM(RTRIM(@p_Status))) != 'OCCUPIED' THEN NULL ELSE @p_EmployeeId END,
+          [ALLOTMENT ORDER] = CASE WHEN UPPER(LTRIM(RTRIM(@p_Status))) != 'OCCUPIED' THEN NULL ELSE @p_AllotmentId END,
+          ALT_DT = CASE WHEN UPPER(LTRIM(RTRIM(@p_Status))) != 'OCCUPIED' THEN NULL ELSE @p_AllotmentDate END
         WHERE CAST(AREA_TYPE AS NVARCHAR(64)) = @p_Area
           AND CAST([QUARTER NUMBER] AS NVARCHAR(64)) = @p_QuarterNo
       `);
-
-    if (result.rowsAffected[0] === 0) {
-      return res.status(404).json({ error: "Quarter not found with given area and number" });
-    }
 
     return res.json({ success: true, message: "Status updated successfully" });
   } catch (err) {
