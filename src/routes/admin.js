@@ -694,175 +694,189 @@ router.get("/status-of-applications", async (req, res) => {
       // Publish table may not exist yet — return empty
     }
 
-    if (!activePub) {
-      // No active publication → nothing to show
-      return res.json({ items: [] });
-    }
-
-    // ── Step 2: Fetch ALL applications for this publication period ─────────
-    const fetchResult = await pool
-      .request()
-      .input("PubFrom", sql.VarChar(10), activePub.From_Date)
-      .input("PubTo",   sql.VarChar(10), activePub.To_Date)
-      .query(`
-        SELECT
-          qa.[Id],
-          qa.[AppNo],
-          qa.[UserId],
-          qa.[EmpId],
-          qa.[EmpName],
-          qa.[Class],
-          qa.[Caste],
-          qa.[EmailId],
-          CONVERT(varchar(10), qa.[ReqDate], 23)    AS ReqDate,
-          qa.[QtrRequested],
-          qa.[QtrLocation],
-          qa.[QtrType],
-          qa.[Reason],
-          qa.[ExchangeReason],
-          qa.[Department],
-          qa.[Status],
-          qa.[PublishedDateFrom],
-          qa.[PublishedDateTo],
-          ud.[Basic]                                 AS Basic,
-          CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
-          CONVERT(varchar(10), ud.GradDate, 23)      AS GradDate,
-          CONVERT(varchar(10), ud.DateOfBirth, 23)   AS DateOfBirth,
-          ud.[area_type]                             AS CurrentAreaType,
-          ud.[Quarter_no]                            AS CurrentQuarterNo,
-          ud.[Category]                              AS CurrentQuarterType,
-          ''                                         AS RosterNo
-        FROM dbo.Quarter_Applications qa
-        LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
-        WHERE
-          CONVERT(varchar(10), qa.PublishedDateFrom, 23) = @PubFrom
-          AND CONVERT(varchar(10), qa.PublishedDateTo, 23) = @PubTo
-        ORDER BY qa.[Id] ASC
-      `);
-
-    const allApps = fetchResult.recordset || [];
-
-    // ── Step 3: Separate pending vs already-approved ───────────────────────
-    const pendingApps  = allApps.filter(r => (r.Status || "").toLowerCase() === "pending");
-    const approvedApps = allApps.filter(r => (r.Status || "").toLowerCase() === "approved");
-
-    // Track UserId of everyone already approved in this publication period
-    const approvedUserIds = new Set(approvedApps.map(r => r.UserId));
-
-    // Track Quarters that ALREADY have a winner, so we don't assign multiple winners
-    // if this route is called multiple times.
-    const approvedQuarters = new Set(approvedApps.map(app => {
-      return [
-        String(app.QtrType      || "").trim().toLowerCase(),
-        String(app.QtrLocation  || "").trim().toLowerCase(),
-        String(app.QtrRequested || "").trim().toLowerCase(),
-      ].join("|||");
-    }));
-
-    // ── Step 4: Group PENDING apps by (QtrType + QtrLocation + QtrRequested) ─
-    const groups = {};
-    for (const app of pendingApps) {
-      const key = [
-        String(app.QtrType      || "").trim().toLowerCase(),
-        String(app.QtrLocation  || "").trim().toLowerCase(),
-        String(app.QtrRequested || "").trim().toLowerCase(),
-      ].join("|||");
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(app);
-    }
-
-    // ── Step 5: Sort each group by seniority ──────────────────────────────
-    const getClassRankSt = (cls) => {
-      const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
-      if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
-      if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
-      // Check longer names first to avoid substring false matches (CLASSIII contains CLASSII)
-      if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
-      if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
-      if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 3;
-      if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
-      return 99;
-    };
-
-    const senioritySorter = (a, b) => {
-      const rankA = getClassRankSt(a.Class);
-      const rankB = getClassRankSt(b.Class);
-      if (rankA !== rankB) return rankA - rankB;
-
-      const gradDiff = compareNullableNumber(toTimeOrNull(a.GradDate), toTimeOrNull(b.GradDate));
-      if (gradDiff !== 0) return gradDiff;
-
-      const dojDiff = compareNullableNumber(toTimeOrNull(a.DateOfJoining), toTimeOrNull(b.DateOfJoining));
-      if (dojDiff !== 0) return dojDiff;
-
-      const basicA = Number(a.Basic || 0);
-      const basicB = Number(b.Basic || 0);
-      if (basicA !== basicB) return basicB - basicA;
-
-      const dobDiff = compareNullableNumber(toTimeOrNull(a.DateOfBirth), toTimeOrNull(b.DateOfBirth));
-      if (dobDiff !== 0) return dobDiff;
-
-      const reqDiff = compareNullableNumber(toTimeOrNull(a.ReqDate), toTimeOrNull(b.ReqDate));
-      if (reqDiff !== 0) return reqDiff;
-
-      return Number(a.Id) - Number(b.Id);
-    };
-
-    for (const key of Object.keys(groups)) {
-      groups[key].sort(senioritySorter);
-    }
-
-    // ── Step 6: Greedy one-per-person winner selection ─────────────────────
-    // Process groups in consistent alphabetical order so results are deterministic.
-    const newWinners = [];
-    for (const key of Object.keys(groups).sort()) {
-      if (approvedQuarters.has(key)) {
-        // This quarter ALREADY has an approved winner from a previous run! Skip it.
-        continue;
-      }
-
-      const group = groups[key];
-      // Find the most senior person not already approved for another quarter
-      const winner = group.find(app => !approvedUserIds.has(app.UserId));
-      if (winner) {
-        newWinners.push(winner);
-        approvedUserIds.add(winner.UserId); // block this person from winning another quarter
-        approvedQuarters.add(key);          // block this quarter from being won again
-      }
-    }
-
-    // ── Step 7: Batch-update new winners to 'approved' in the DB ──────────
-    for (const winner of newWinners) {
-      await pool
+    if (activePub) {
+      // ── Step 2: Fetch ALL applications for this active publication period ─────────
+      const fetchResult = await pool
         .request()
-        .input("WinnerId", sql.Int, winner.Id)
+        .input("PubFrom", sql.VarChar(10), activePub.From_Date)
+        .input("PubTo",   sql.VarChar(10), activePub.To_Date)
         .query(`
-          UPDATE dbo.Quarter_Applications
-          SET    Status    = 'approved',
-                 UpdatedAt = SYSUTCDATETIME()
-          WHERE  Id     = @WinnerId
-            AND  Status = 'pending'
+          SELECT
+            qa.[Id],
+            qa.[AppNo],
+            qa.[UserId],
+            qa.[EmpId],
+            qa.[EmpName],
+            qa.[Class],
+            qa.[Caste],
+            qa.[EmailId],
+            CONVERT(varchar(10), qa.[ReqDate], 23)    AS ReqDate,
+            qa.[QtrRequested],
+            qa.[QtrLocation],
+            qa.[QtrType],
+            qa.[Reason],
+            qa.[ExchangeReason],
+            qa.[Department],
+            qa.[Status],
+            qa.[PublishedDateFrom],
+            qa.[PublishedDateTo],
+            ud.[Basic]                                 AS Basic,
+            CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
+            CONVERT(varchar(10), ud.GradDate, 23)      AS GradDate,
+            CONVERT(varchar(10), ud.DateOfBirth, 23)   AS DateOfBirth,
+            ud.[area_type]                             AS CurrentAreaType,
+            ud.[Quarter_no]                            AS CurrentQuarterNo,
+            ud.[Category]                              AS CurrentQuarterType,
+            ''                                         AS RosterNo
+          FROM dbo.Quarter_Applications qa
+          LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+          WHERE
+            CONVERT(varchar(10), qa.PublishedDateFrom, 23) = @PubFrom
+            AND CONVERT(varchar(10), qa.PublishedDateTo, 23) = @PubTo
+          ORDER BY qa.[Id] ASC
         `);
+
+      const allApps = fetchResult.recordset || [];
+
+      // ── Step 3: Separate pending vs already-approved ───────────────────────
+      const pendingApps  = allApps.filter(r => (r.Status || "").toLowerCase() === "pending");
+      const approvedApps = allApps.filter(r => (r.Status || "").toLowerCase() === "approved");
+
+      // Track UserId of everyone already approved in this publication period
+      const approvedUserIds = new Set(approvedApps.map(r => r.UserId));
+
+      // Track Quarters that ALREADY have a winner, so we don't assign multiple winners
+      const approvedQuarters = new Set(approvedApps.map(app => {
+        return [
+          String(app.QtrType      || "").trim().toLowerCase(),
+          String(app.QtrLocation  || "").trim().toLowerCase(),
+          String(app.QtrRequested || "").trim().toLowerCase(),
+        ].join("|||");
+      }));
+
+      // ── Step 4: Group PENDING apps by (QtrType + QtrLocation + QtrRequested) ─
+      const groups = {};
+      for (const app of pendingApps) {
+        const key = [
+          String(app.QtrType      || "").trim().toLowerCase(),
+          String(app.QtrLocation  || "").trim().toLowerCase(),
+          String(app.QtrRequested || "").trim().toLowerCase(),
+        ].join("|||");
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(app);
+      }
+
+      // ── Step 5: Sort each group by seniority ──────────────────────────────
+      const getClassRankSt = (cls) => {
+        const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
+        if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
+        if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
+        if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
+        if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
+        if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 3;
+        if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
+        return 99;
+      };
+
+      const senioritySorter = (a, b) => {
+        const rankA = getClassRankSt(a.Class);
+        const rankB = getClassRankSt(b.Class);
+        if (rankA !== rankB) return rankA - rankB;
+
+        const gradDiff = compareNullableNumber(toTimeOrNull(a.GradDate), toTimeOrNull(b.GradDate));
+        if (gradDiff !== 0) return gradDiff;
+
+        const dojDiff = compareNullableNumber(toTimeOrNull(a.DateOfJoining), toTimeOrNull(b.DateOfJoining));
+        if (dojDiff !== 0) return dojDiff;
+
+        const basicA = Number(a.Basic || 0);
+        const basicB = Number(b.Basic || 0);
+        if (basicA !== basicB) return basicB - basicA;
+
+        const dobDiff = compareNullableNumber(toTimeOrNull(a.DateOfBirth), toTimeOrNull(b.DateOfBirth));
+        if (dobDiff !== 0) return dobDiff;
+
+        const reqDiff = compareNullableNumber(toTimeOrNull(a.ReqDate), toTimeOrNull(b.ReqDate));
+        if (reqDiff !== 0) return reqDiff;
+
+        return Number(a.Id) - Number(b.Id);
+      };
+
+      for (const key of Object.keys(groups)) {
+        groups[key].sort(senioritySorter);
+      }
+
+      // ── Step 6: Greedy winner selection ─────────────────────
+      const newWinners = [];
+      for (const key of Object.keys(groups).sort()) {
+        if (approvedQuarters.has(key)) continue;
+
+        const group = groups[key];
+        const winner = group.find(app => !approvedUserIds.has(app.UserId));
+        if (winner) {
+          newWinners.push(winner);
+          approvedUserIds.add(winner.UserId);
+          approvedQuarters.add(key);
+        }
+      }
+
+      // ── Step 7: Batch-update new winners to 'approved' in the DB ──────────
+      for (const winner of newWinners) {
+        await pool
+          .request()
+          .input("WinnerId", sql.Int, winner.Id)
+          .query(`
+            UPDATE dbo.Quarter_Applications
+            SET    Status    = 'approved',
+                   UpdatedAt = SYSUTCDATETIME()
+            WHERE  Id     = @WinnerId
+              AND  Status = 'pending'
+          `);
+      }
     }
 
-    // ── Step 8: Build final list — already-approved + newly approved ───────
-    // Merge, then sort for display: globally by seniority (Class first)
-    const newWinnerSet = new Set(newWinners.map(w => w.Id));
-    const allApproved = [
-      ...approvedApps,
-      ...newWinners.map(w => ({ ...w, Status: "approved" })),
-    ].sort((a, b) => {
-      return senioritySorter(a, b);
-    });
+    // ── Step 8: Fetch ALL approved applications (current & historical) ─────────────────────
+    const allApprovedResult = await pool.request().query(`
+      SELECT
+        qa.[Id],
+        qa.[AppNo],
+        qa.[UserId],
+        qa.[EmpId],
+        qa.[EmpName],
+        qa.[Class],
+        qa.[Caste],
+        qa.[EmailId],
+        CONVERT(varchar(10), qa.[ReqDate], 23)    AS ReqDate,
+        qa.[QtrRequested],
+        qa.[QtrLocation],
+        qa.[QtrType],
+        qa.[Reason],
+        qa.[ExchangeReason],
+        qa.[Department],
+        qa.[Status],
+        qa.[PublishedDateFrom],
+        qa.[PublishedDateTo],
+        ud.[Basic]                                 AS Basic,
+        CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
+        CONVERT(varchar(10), ud.GradDate, 23)      AS GradDate,
+        CONVERT(varchar(10), ud.DateOfBirth, 23)   AS DateOfBirth,
+        ud.[area_type]                             AS CurrentAreaType,
+        ud.[Quarter_no]                            AS CurrentQuarterNo,
+        ud.[Category]                              AS CurrentQuarterType,
+        ''                                         AS RosterNo
+      FROM dbo.Quarter_Applications qa
+      LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+      WHERE qa.[Status] = 'approved'
+      ORDER BY qa.[Id] DESC
+    `);
+
+    const allApprovedApps = allApprovedResult.recordset || [];
 
     // ── Step 9: Map to frontend keys ───────────────────────────────────────
-    const items = allApproved.map(r => ({
-      // Identity (used by debar modal internally)
+    const items = allApprovedApps.map(r => ({
       id:                r.Id,
       userId:            r.UserId,
       appNo:             r.AppNo,
-
-      // Table columns
       empId:             r.EmpId,
       empName:           r.EmpName,
       class:             r.Class,
@@ -878,15 +892,11 @@ router.get("/status-of-applications", async (req, res) => {
       exchange:          r.ExchangeReason,
       rosterNo:          r.RosterNo,
       result:            r.Status || "approved",
-
-      // Used by debar modal detail rows
       emailId:           r.EmailId,
       basic:             r.Basic,
       dateOfJoin:        r.DateOfJoining,
       reqDate:           r.ReqDate,
       reason:            r.Reason,
-
-      // Used for current vs. history filtering in the frontend
       publishedDateFrom: r.PublishedDateFrom,
       publishedDateTo:   r.PublishedDateTo,
     }));
