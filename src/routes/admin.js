@@ -303,7 +303,7 @@ async function computeDynamicAllotments() {
   
   const applicantsRes = await pool.request().query(`
     SELECT a.Id, a.EmpId, a.EmpName, a.Caste, a.QtrType, a.QtrLocation, a.QtrRequested, a.PriorityNo, a.Reason,
-           a.Class, a.ReqDate, ud.GradDate, ud.Basic, ud.DateOfJoining, ud.DateOfBirth
+           a.Class, a.ReqDate, a.PublishedDateFrom, a.PublishedDateTo, ud.GradDate, ud.Basic, ud.DateOfJoining, ud.DateOfBirth
     FROM dbo.Quarter_Applications a
     LEFT JOIN dbo.UserDetails ud ON a.UserId = ud.UserId
     WHERE a.Status = 'Pending'
@@ -1118,6 +1118,16 @@ async function ensurePublishQuarterTypesColumn(pool) {
   `);
 }
 
+
+async function ensurePublishAssignmentsColumn(pool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.Publish', 'Assignments') IS NULL
+    BEGIN
+      ALTER TABLE dbo.Publish ADD Assignments NVARCHAR(MAX) NULL;
+    END;
+  `);
+}
+
 router.post("/publish", upload.any(), async (req, res) => {
   try {
     // Find the circular file if it exists
@@ -1172,6 +1182,7 @@ router.post("/publish", upload.any(), async (req, res) => {
     }
 
     await ensurePublishQuarterTypesColumn(pool);
+      await ensurePublishAssignmentsColumn(pool);
 
     // Parse published quarter types (sent as JSON string from FormData)
     let quarterTypesStr = null;
@@ -1185,26 +1196,41 @@ router.post("/publish", upload.any(), async (req, res) => {
       }
     }
 
-    // Create new publication
+    
+      let assignmentsStr = null;
+      const rawAssignments = req.body.assignments;
+      if (rawAssignments) {
+        try {
+          const parsed = Array.isArray(rawAssignments) ? rawAssignments : JSON.parse(rawAssignments);
+          assignmentsStr = JSON.stringify(parsed);
+        } catch {
+          assignmentsStr = String(rawAssignments).trim() || null;
+        }
+      }
+
+      // Create new publication
     await pool.request()
       .input("fromDate", sql.Date, fromDate)
       .input("toDate", sql.Date, toDate)
       .input("quarterTypes", sql.NVarChar(sql.MAX), quarterTypesStr)
+        .input("assignments", sql.NVarChar(sql.MAX), assignmentsStr)
       .query(`
         INSERT INTO dbo.Publish
         (
           From_Date,
           To_Date,
           Current_State,
-          QuarterTypes
-        )
+            QuarterTypes,
+            Assignments
+          )
         VALUES
         (
           @fromDate,
           @toDate,
           'Published',
-          @quarterTypes
-        )
+            @quarterTypes,
+            @assignments
+          )
       `);
 
     if (req.file) {
@@ -1526,16 +1552,19 @@ router.get("/quarter-numbers", async (req, res) => {
       .input("QuarterTypes", sql.NVarChar(sql.MAX), targetTypes)
       .input("AreaTypes", sql.NVarChar(sql.MAX), targetAreas)
       .query(`
-        SELECT DISTINCT LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(100)))) AS QuarterNo
-        FROM dbo.[Estate_Quarters]
-        WHERE CATEGORY IN (SELECT value FROM STRING_SPLIT(@QuarterTypes, ','))
-          AND AREA_TYPE IN (SELECT value FROM STRING_SPLIT(@AreaTypes, ','))
-          AND [QUARTER NUMBER] IS NOT NULL
-          AND LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(100)))) <> ''
-        ORDER BY QuarterNo ASC
+        SELECT LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(100)))) AS QuarterNo, MAX(Status1) as Status1
+          FROM dbo.[Estate_Quarters]
+          WHERE CATEGORY IN (SELECT value FROM STRING_SPLIT(@QuarterTypes, ','))
+            AND AREA_TYPE IN (SELECT value FROM STRING_SPLIT(@AreaTypes, ','))
+            AND [QUARTER NUMBER] IS NOT NULL
+            AND LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(100)))) <> ''
+          GROUP BY LTRIM(RTRIM(CAST([QUARTER NUMBER] AS NVARCHAR(100))))
+          ORDER BY QuarterNo ASC
       `);
     const numbers = result.recordset.map((r) => r.QuarterNo);
-    return res.json({ numbers });
+      const statusMap = {};
+      result.recordset.forEach(r => { statusMap[r.QuarterNo] = r.Status1; });
+      return res.json({ numbers, statusMap });
   } catch (err) {
     console.error("quarter-numbers error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -1712,6 +1741,7 @@ async function buildAllotmentOrderPDF(application) {
 async function buildCircularPDF(body) {
   const {
     circularNo,
+    assignments,
     circularDate,
     quarterTypes,
     quarterType,
@@ -1801,8 +1831,12 @@ async function buildCircularPDF(body) {
   doc.moveDown(1.5);
 
   // ── Body ─────────────────────────────────────────────────────────────────
+  
   let targetQuartersStr = "";
-  if (quarterNos && Array.isArray(quarterNos) && quarterNos.length > 0 && quarterTypes && Array.isArray(quarterTypes) && quarterTypes.length > 0 && areaTypes && Array.isArray(areaTypes) && areaTypes.length > 0) {
+  if (assignments && assignments.length > 0) {
+    const uniqueCategories = Array.from(new Set(assignments.map(a => a.category)));
+    targetQuartersStr = "'" + uniqueCategories.join("', '") + "' type quarters";
+  } else if (quarterNos && Array.isArray(quarterNos) && quarterNos.length > 0 && quarterTypes && Array.isArray(quarterTypes) && quarterTypes.length > 0 && areaTypes && Array.isArray(areaTypes) && areaTypes.length > 0) {
     targetQuartersStr = `Quarter No(s). ${quarterNos.join(", ")} of Type(s) ${quarterTypes.join(", ")} in Area(s) ${areaTypes.join(", ")}`;
   } else if (quarterNos && Array.isArray(quarterNos) && quarterNos.length > 0 && quarterType && areaType) {
     targetQuartersStr = `Quarter No(s). ${quarterNos.join(", ")} (Type: ${quarterType}, Area: ${areaType})`;
@@ -1868,7 +1902,101 @@ async function buildCircularPDF(body) {
     doc.moveDown(0.2);
   });
 
+  
+  // ── Page 2: Table of Assignments ─────────────────────────────────────────
+  if (assignments && assignments.length > 0) {
+    doc.addPage();
+    doc.font("Helvetica-Bold").fontSize(12).text(`FRESH VACANT QUARTER LIST FOR HOUSE ALLOTMENT COMIITTEE DTD. ${circularDate || ""}`, { underline: true });
+    doc.moveDown(1.5);
+
+    const tableTop = doc.y;
+    const colSl = 60;
+    const colQuarter = 100;
+    const colCategory = 350;
+    const colRemarks = 480;
+    const tableWidth = 480;
+
+    // Table Header
+    doc.font("Helvetica-Bold").fontSize(11);
+    doc.rect(colSl, tableTop, colQuarter - colSl, 25).stroke();
+    doc.rect(colQuarter, tableTop, colCategory - colQuarter, 25).stroke();
+    doc.rect(colCategory, tableTop, colRemarks - colCategory, 25).stroke();
+    doc.rect(colRemarks, tableTop, 60, 25).stroke();
+
+    doc.text("Sl. No.", colSl + 5, tableTop + 7, { width: colQuarter - colSl - 10, align: "center" });
+    doc.text("Quarter No", colQuarter + 5, tableTop + 7, { width: colCategory - colQuarter - 10, align: "center" });
+    doc.text("Category", colCategory + 5, tableTop + 7, { width: colRemarks - colCategory - 10, align: "center" });
+    doc.text("Remarks", colRemarks + 5, tableTop + 7, { width: 50, align: "center" });
+
+    let yPosition = tableTop + 25;
+    doc.font("Helvetica").fontSize(11);
+    
+    let totalNos = 0;
+    let slNo = 1;
+
+    // Group assignments by category
+    const groupedByCategory = assignments.reduce((acc, curr) => {
+        if (!acc[curr.category]) acc[curr.category] = [];
+        acc[curr.category].push(curr);
+        return acc;
+    }, {});
+
+    for (const [category, arr] of Object.entries(groupedByCategory)) {
+        let allQuarterStrs = [];
+        let rowCount = 0;
+        
+        arr.forEach(a => {
+            const nos = a.quarterNos || [];
+            if (nos.length > 0) {
+                const groupedByAreaStr = nos.map(n => `${a.area} - ${n}`).join(", ");
+                allQuarterStrs.push(groupedByAreaStr);
+                rowCount += nos.length;
+            }
+        });
+        
+        if (rowCount > 0) {
+            let quarterText = allQuarterStrs.join("\n");
+            let textHeight = doc.heightOfString(quarterText, { width: colCategory - colQuarter - 10 }) + 10;
+            if (textHeight < 30) textHeight = 30;
+
+            if (yPosition + textHeight > 750) {
+                doc.addPage();
+                yPosition = 60;
+            }
+
+            doc.rect(colSl, yPosition, colQuarter - colSl, textHeight).stroke();
+            doc.rect(colQuarter, yPosition, colCategory - colQuarter, textHeight).stroke();
+            doc.rect(colCategory, yPosition, colRemarks - colCategory, textHeight).stroke();
+            doc.rect(colRemarks, yPosition, 60, textHeight).stroke();
+
+            doc.text(slNo.toString() + ".", colSl + 5, yPosition + 10, { width: colQuarter - colSl - 10, align: "center" });
+            doc.text(quarterText, colQuarter + 5, yPosition + 10, { width: colCategory - colQuarter - 10, align: "left" });
+            doc.text(category, colCategory + 5, yPosition + 10, { width: colRemarks - colCategory - 10, align: "center" });
+            doc.text(rowCount.toString().padStart(2, '0'), colRemarks + 5, yPosition + 10, { width: 50, align: "center" });
+
+            yPosition += textHeight;
+            totalNos += rowCount;
+            slNo++;
+        }
+    }
+
+    // Total Row
+    doc.font("Helvetica-Bold").fontSize(11);
+    doc.rect(colSl, yPosition, colRemarks - colSl, 25).stroke();
+    doc.rect(colRemarks, yPosition, 60, 25).stroke();
+    doc.text("Total", colSl, yPosition + 7, { width: colRemarks - colSl, align: "center" });
+    doc.text(`${totalNos.toString().padStart(2, '0')} nos.`, colRemarks + 5, yPosition + 7, { width: 50, align: "center" });
+
+    doc.moveDown(5);
+    
+    // Signature block on the left side
+    const sigBlockX = 60;
+    doc.text("Zone-in-charge, Madhuban", sigBlockX, doc.y + 40, { align: "left" });
+    doc.text("Estate Wing, PPA", sigBlockX, doc.y, { align: "left" });
+  }
+
   doc.end();
+
   await pdfReady;
 
   return Buffer.concat(chunks);
@@ -1911,6 +2039,8 @@ router.post("/generate-circular", async (req, res) => {
 });
 
 module.exports = router;
+
+
 
 
 

@@ -13,7 +13,8 @@ function getPool() {
       password: db.password,
       options: {
         encrypt: db.encrypt,
-        trustServerCertificate: db.trustServerCertificate
+        trustServerCertificate: db.trustServerCertificate,
+        requestTimeout: 60000
       },
 
       

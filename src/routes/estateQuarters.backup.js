@@ -88,7 +88,15 @@ router.get("/vacant", requireAuth, async (req, res) => {
             )
             ${quarterTypesParam ? `AND eq.CATEGORY IN (${publishedTypes.map(t => "'" + t.replace(/'/g, "''") + "'").join(',')})` : ''}
             ${assignmentConditions ? assignmentConditions : ''}
-
+            AND NOT EXISTS (
+                -- Globally hide quarters that are already approved for someone else
+                SELECT 1
+                FROM dbo.Quarter_Applications qa
+                WHERE LOWER(LTRIM(RTRIM(CAST(qa.[Status] AS NVARCHAR(24))))) = 'approved'
+                  AND CAST(qa.[QtrRequested] AS NVARCHAR(64)) = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
+                  AND CAST(qa.[QtrLocation] AS NVARCHAR(64)) = CAST(eq.AREA_TYPE AS NVARCHAR(64))
+                  AND CAST(qa.[QtrType] AS NVARCHAR(64)) = CAST(eq.CATEGORY AS NVARCHAR(64))
+            )
             AND NOT EXISTS (
                 -- Hide quarters that the CURRENT user has already applied for (if not rejected/cancelled)
                 SELECT 1
@@ -112,18 +120,7 @@ router.get("/vacant", requireAuth, async (req, res) => {
       IsAvailable: true
     }));
 
-    console.log("=== /vacant API CALLED ===");
-    console.log("className:", className);
-    console.log("quarterTypesParam:", quarterTypesParam);
-    console.log("assignmentConditions:", assignmentConditions);
-    console.log("items.length:", items.length);
-    console.log("items:", items);
-    console.log("==========================");
-
-    res.json({
-      items,
-      publishedTypes
-    });
+    return res.json({ items, total: items.length, publishedTypes });
 
   } catch (err) {
     console.error("Error fetching vacant quarters:", err);
