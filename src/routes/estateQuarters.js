@@ -278,6 +278,7 @@ router.get("/numbers", requireAuth, async (req, res) => {
   }
 });
 
+
 router.get("/current-status", requireAuth, async (req, res) => {
   const { area, quarterNumber } = req.query;
   if (!area || !quarterNumber) {
