@@ -292,6 +292,190 @@ router.get("/applications", async (req, res) => {
 });
 
 
+async function computeDynamicAllotments() {
+  const pool = await getPool();
+  
+  const rosterRes = await pool.request().query("SELECT QuarterType, CurrentNumber FROM dbo.Roster_Counters");
+  const rosterCounters = {};
+  for (const r of rosterRes.recordset) {
+    rosterCounters[r.QuarterType] = r.CurrentNumber;
+  }
+  
+  const applicantsRes = await pool.request().query(`
+    SELECT a.Id, a.EmpId, a.EmpName, a.Caste, a.QtrType, a.QtrLocation, a.QtrRequested, a.PriorityNo, a.Reason,
+           a.Class, a.ReqDate, ud.GradDate, ud.Basic, ud.DateOfJoining, ud.DateOfBirth
+    FROM dbo.Quarter_Applications a
+    LEFT JOIN dbo.UserDetails ud ON a.UserId = ud.UserId
+    WHERE a.Status = 'Pending'
+  `);
+  
+  const applicants = applicantsRes.recordset;
+  
+  const quartersMap = {};
+  for (const app of applicants) {
+    const key = `${app.QtrType}|${app.QtrLocation}|${app.QtrRequested}`;
+    if (!quartersMap[key]) {
+      quartersMap[key] = {
+        QtrType: app.QtrType,
+        QtrLocation: app.QtrLocation,
+        QtrRequested: app.QtrRequested,
+        applicants: []
+      };
+    }
+    quartersMap[key].applicants.push(app);
+  }
+  
+  const quartersList = Object.values(quartersMap).sort((a, b) => {
+    if (a.QtrType !== b.QtrType) return (a.QtrType || "").localeCompare(b.QtrType || "");
+    if (a.QtrLocation !== b.QtrLocation) return (a.QtrLocation || "").localeCompare(b.QtrLocation || "");
+    return (a.QtrRequested || "").localeCompare(b.QtrRequested || "");
+  });
+  
+  const results = {
+    winners: [],
+    losers: []
+  };
+  
+  const mapQtrTypeToRosterKey = (qType) => {
+    if (!qType) return "";
+    const t = String(qType).trim().toUpperCase();
+    if (t === "A TYPE") return "Atype";
+    if (t === "B TYPE") return "Btype";
+    if (t === "B TYPE IIIR") return "Btype IIR";
+    if (t === "C TYPE") return "Ctype";
+    if (t === "C TYPE (MODIFIED)") return "Ctype (Modified)";
+    if (t === "D TYPE") return "Dtype";
+    return qType;
+  };
+
+  for (const q of quartersList) {
+    const rawType = q.QtrType;
+    const dbRosterKey = mapQtrTypeToRosterKey(rawType);
+    let currentNumber = rosterCounters[dbRosterKey] || 1;
+    
+    const getClassRankSt = (cls) => {
+      const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
+      if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
+      if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
+      if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
+      if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
+      if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 2;
+      if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
+      return 99;
+    };
+    q.applicants.sort((a, b) => {
+      const rankA = getClassRankSt(a.Class);
+      const rankB = getClassRankSt(b.Class);
+      if (rankA !== rankB) return rankA - rankB;
+      
+      const toTimeOrNull = (val) => {
+        if (!val) return null;
+        const time = new Date(val).getTime();
+        return Number.isNaN(time) ? null : time;
+      };
+
+      const gradDiff = compareNullableNumber(toTimeOrNull(a.GradDate), toTimeOrNull(b.GradDate));
+      if (gradDiff !== 0) return gradDiff;
+
+      const dojDiff = compareNullableNumber(toTimeOrNull(a.DateOfJoining), toTimeOrNull(b.DateOfJoining));
+      if (dojDiff !== 0) return dojDiff;
+
+      const basicA = Number(a.Basic || 0);
+      const basicB = Number(b.Basic || 0);
+      if (basicA !== basicB) return basicB - basicA;
+
+      const dobDiff = compareNullableNumber(toTimeOrNull(a.DateOfBirth), toTimeOrNull(b.DateOfBirth));
+      if (dobDiff !== 0) return dobDiff;
+
+      const reqDiff = compareNullableNumber(toTimeOrNull(a.ReqDate), toTimeOrNull(b.ReqDate));
+      if (reqDiff !== 0) return reqDiff;
+
+      return Number(a.Id) - Number(b.Id);
+    });
+    
+    let requiredCategory = "General";
+    const qTypeUpper = (rawType || "").toUpperCase();
+    if (qTypeUpper.includes("A") || qTypeUpper.includes("B")) {
+      if ([10, 20, 40, 50].includes(currentNumber)) requiredCategory = "SC";
+      else if ([30, 60].includes(currentNumber)) requiredCategory = "ST";
+    } else if (qTypeUpper.includes("C") || qTypeUpper.includes("D")) {
+      if ([20, 40].includes(currentNumber)) requiredCategory = "SC";
+      else if (currentNumber === 60) requiredCategory = "ST";
+    }
+    
+    let winner = null;
+    if (requiredCategory !== "General") {
+      winner = q.applicants.find(app => (app.Caste || "").toUpperCase() === requiredCategory);
+      if (!winner && requiredCategory === "SC") {
+        winner = q.applicants.find(app => (app.Caste || "").toUpperCase() === "ST");
+      }
+    }
+    if (!winner) {
+      winner = q.applicants[0];
+    }
+    
+    if ((winner.Reason || "").toLowerCase() === 'exchange') {
+      winner.RosterNo = null;
+    } else {
+      winner.RosterNo = currentNumber;
+      rosterCounters[dbRosterKey] = currentNumber >= 60 ? 1 : currentNumber + 1;
+    }
+    
+    winner.TentativeStatus = "Allotted";
+    results.winners.push(winner);
+    
+    for (const app of q.applicants) {
+      if (app.Id !== winner.Id) {
+        app.TentativeStatus = "Rejected";
+        results.losers.push(app);
+      }
+    }
+  }  return { results, newCounters: rosterCounters };
+}
+
+router.get("/dynamic-allotments", requireAuth, requireRole(["admin", "superadmin"]), async (req, res) => {
+  try {
+    const data = await computeDynamicAllotments();
+    return res.json(data.results);
+  } catch (err) {
+    console.error("Dynamic Allotments Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/finalize-allotments", requireAuth, requireRole(["admin", "superadmin"]), async (req, res) => {
+  try {
+    const data = await computeDynamicAllotments();
+    const pool = await getPool();
+    
+    for (const winner of data.results.winners) {
+      await pool.request()
+        .input("Id", sql.Int, winner.Id)
+        .input("RosterNo", sql.Int, winner.RosterNo)
+        .query("UPDATE dbo.Quarter_Applications SET Status = 'Approved', RosterNo = @RosterNo, UpdatedAt = SYSUTCDATETIME() WHERE Id = @Id");
+    }
+    
+    for (const loser of data.results.losers) {
+      await pool.request()
+        .input("Id", sql.Int, loser.Id)
+        .query("UPDATE dbo.Quarter_Applications SET Status = 'Rejected', UpdatedAt = SYSUTCDATETIME() WHERE Id = @Id");
+    }
+    
+    for (const [type, newNumber] of Object.entries(data.newCounters)) {
+      await pool.request()
+        .input("Type", sql.NVarChar(64), type)
+        .input("Num", sql.Int, newNumber)
+        .query("UPDATE dbo.Roster_Counters SET CurrentNumber = @Num WHERE QuarterType = @Type");
+    }
+    
+    return res.json({ success: true, message: `Finalized ${data.results.winners.length} allotments.` });
+  } catch (err) {
+    console.error("Finalize Allotments Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 router.get("/verify-quarter-applications", async (req, res) => {
   try {
     const pool = await getPool();
@@ -678,7 +862,6 @@ router.get("/status-of-applications", async (req, res) => {
     const pool = await getPool();
     await ensureQuarterApplicationDepartmentColumn(pool);
 
-    // ── Step 1: Get the currently active publication ───────────────────────
     let activePub = null;
     try {
       const pubResult = await pool.request().query(`
@@ -690,152 +873,14 @@ router.get("/status-of-applications", async (req, res) => {
         ORDER BY PublishID DESC
       `);
       activePub = pubResult.recordset[0] || null;
-    } catch (_) {
-      // Publish table may not exist yet — return empty
-    }
+    } catch (_) {}
 
+    let dynamicWinners = [];
     if (activePub) {
-      // ── Step 2: Fetch ALL applications for this active publication period ─────────
-      const fetchResult = await pool
-        .request()
-        .input("PubFrom", sql.VarChar(10), activePub.From_Date)
-        .input("PubTo",   sql.VarChar(10), activePub.To_Date)
-        .query(`
-          SELECT
-            qa.[Id],
-            qa.[AppNo],
-            qa.[UserId],
-            qa.[EmpId],
-            qa.[EmpName],
-            qa.[Class],
-            qa.[Caste],
-            qa.[EmailId],
-            CONVERT(varchar(10), qa.[ReqDate], 23)    AS ReqDate,
-            qa.[QtrRequested],
-            qa.[QtrLocation],
-            qa.[QtrType],
-            qa.[Reason],
-            qa.[ExchangeReason],
-            qa.[Department],
-            qa.[Status],
-            qa.[PublishedDateFrom],
-            qa.[PublishedDateTo],
-            ud.[Basic]                                 AS Basic,
-            CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
-            CONVERT(varchar(10), ud.GradDate, 23)      AS GradDate,
-            CONVERT(varchar(10), ud.DateOfBirth, 23)   AS DateOfBirth,
-            ud.[area_type]                             AS CurrentAreaType,
-            ud.[Quarter_no]                            AS CurrentQuarterNo,
-            ud.[Category]                              AS CurrentQuarterType,
-            ''                                         AS RosterNo
-          FROM dbo.Quarter_Applications qa
-          LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
-          WHERE
-            CONVERT(varchar(10), qa.PublishedDateFrom, 23) = @PubFrom
-            AND CONVERT(varchar(10), qa.PublishedDateTo, 23) = @PubTo
-          ORDER BY qa.[Id] ASC
-        `);
-
-      const allApps = fetchResult.recordset || [];
-
-      // ── Step 3: Separate pending vs already-approved ───────────────────────
-      const pendingApps  = allApps.filter(r => (r.Status || "").toLowerCase() === "pending");
-      const approvedApps = allApps.filter(r => (r.Status || "").toLowerCase() === "approved");
-
-      // Track UserId of everyone already approved in this publication period
-      const approvedUserIds = new Set(approvedApps.map(r => r.UserId));
-
-      // Track Quarters that ALREADY have a winner, so we don't assign multiple winners
-      const approvedQuarters = new Set(approvedApps.map(app => {
-        return [
-          String(app.QtrType      || "").trim().toLowerCase(),
-          String(app.QtrLocation  || "").trim().toLowerCase(),
-          String(app.QtrRequested || "").trim().toLowerCase(),
-        ].join("|||");
-      }));
-
-      // ── Step 4: Group PENDING apps by (QtrType + QtrLocation + QtrRequested) ─
-      const groups = {};
-      for (const app of pendingApps) {
-        const key = [
-          String(app.QtrType      || "").trim().toLowerCase(),
-          String(app.QtrLocation  || "").trim().toLowerCase(),
-          String(app.QtrRequested || "").trim().toLowerCase(),
-        ].join("|||");
-        if (!groups[key]) groups[key] = [];
-        groups[key].push(app);
-      }
-
-      // ── Step 5: Sort each group by seniority ──────────────────────────────
-      const getClassRankSt = (cls) => {
-        const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
-        if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
-        if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
-        if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
-        if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
-        if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 3;
-        if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
-        return 99;
-      };
-
-      const senioritySorter = (a, b) => {
-        const rankA = getClassRankSt(a.Class);
-        const rankB = getClassRankSt(b.Class);
-        if (rankA !== rankB) return rankA - rankB;
-
-        const gradDiff = compareNullableNumber(toTimeOrNull(a.GradDate), toTimeOrNull(b.GradDate));
-        if (gradDiff !== 0) return gradDiff;
-
-        const dojDiff = compareNullableNumber(toTimeOrNull(a.DateOfJoining), toTimeOrNull(b.DateOfJoining));
-        if (dojDiff !== 0) return dojDiff;
-
-        const basicA = Number(a.Basic || 0);
-        const basicB = Number(b.Basic || 0);
-        if (basicA !== basicB) return basicB - basicA;
-
-        const dobDiff = compareNullableNumber(toTimeOrNull(a.DateOfBirth), toTimeOrNull(b.DateOfBirth));
-        if (dobDiff !== 0) return dobDiff;
-
-        const reqDiff = compareNullableNumber(toTimeOrNull(a.ReqDate), toTimeOrNull(b.ReqDate));
-        if (reqDiff !== 0) return reqDiff;
-
-        return Number(a.Id) - Number(b.Id);
-      };
-
-      for (const key of Object.keys(groups)) {
-        groups[key].sort(senioritySorter);
-      }
-
-      // ── Step 6: Greedy winner selection ─────────────────────
-      const newWinners = [];
-      for (const key of Object.keys(groups).sort()) {
-        if (approvedQuarters.has(key)) continue;
-
-        const group = groups[key];
-        const winner = group.find(app => !approvedUserIds.has(app.UserId));
-        if (winner) {
-          newWinners.push(winner);
-          approvedUserIds.add(winner.UserId);
-          approvedQuarters.add(key);
-        }
-      }
-
-      // ── Step 7: Batch-update new winners to 'approved' in the DB ──────────
-      for (const winner of newWinners) {
-        await pool
-          .request()
-          .input("WinnerId", sql.Int, winner.Id)
-          .query(`
-            UPDATE dbo.Quarter_Applications
-            SET    Status    = 'approved',
-                   UpdatedAt = SYSUTCDATETIME()
-            WHERE  Id     = @WinnerId
-              AND  Status = 'pending'
-          `);
-      }
+      const dynamicData = await computeDynamicAllotments();
+      dynamicWinners = dynamicData.results.winners;
     }
 
-    // ── Step 8: Fetch ALL approved applications (current & historical) ─────────────────────
     const allApprovedResult = await pool.request().query(`
       SELECT
         qa.[Id],
@@ -856,50 +901,102 @@ router.get("/status-of-applications", async (req, res) => {
         qa.[Status],
         qa.[PublishedDateFrom],
         qa.[PublishedDateTo],
+        qa.[RosterNo]                              AS DbRosterNo,
         ud.[Basic]                                 AS Basic,
         CONVERT(varchar(10), ud.DateOfJoining, 23) AS DateOfJoining,
         CONVERT(varchar(10), ud.GradDate, 23)      AS GradDate,
         CONVERT(varchar(10), ud.DateOfBirth, 23)   AS DateOfBirth,
         ud.[area_type]                             AS CurrentAreaType,
         ud.[Quarter_no]                            AS CurrentQuarterNo,
-        ud.[Category]                              AS CurrentQuarterType,
-        ''                                         AS RosterNo
+        ud.[Category]                              AS CurrentQuarterType
       FROM dbo.Quarter_Applications qa
       LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
-      WHERE qa.[Status] = 'approved'
+      WHERE qa.[Status] = 'approved' OR qa.[Status] = 'Allotted'
       ORDER BY qa.[Id] DESC
     `);
+    
+    const dbApprovedApps = allApprovedResult.recordset || [];
+    const dbApprovedIds = new Set(dbApprovedApps.map(a => a.Id));
+    
+    const combinedApps = [...dbApprovedApps];
+    for (const dw of dynamicWinners) {
+      if (!dbApprovedIds.has(dw.Id)) {
+        combinedApps.push(dw);
+      }
+    }
 
-    const allApprovedApps = allApprovedResult.recordset || [];
-
-    // ── Step 9: Map to frontend keys ───────────────────────────────────────
-    const items = allApprovedApps.map(r => ({
+    const items = combinedApps.map(r => ({
       id:                r.Id,
       userId:            r.UserId,
       appNo:             r.AppNo,
       empId:             r.EmpId,
       empName:           r.EmpName,
       class:             r.Class,
-      gradDate:          r.GradDate,
-      dept:              r.Department,
       casteId:           r.Caste,
-      currentAreaType:   r.CurrentAreaType,
-      currentQuarterNo:  r.CurrentQuarterNo,
-      currentQtyType:    r.CurrentQuarterType,
+      emailId:           r.EmailId,
+      reqDate:           r.ReqDate,
       reqQtr:            r.QtrRequested,
       reqQtrLocation:    r.QtrLocation,
       reqQtrType:        r.QtrType,
-      exchange:          r.ExchangeReason,
-      rosterNo:          r.RosterNo,
-      result:            r.Status || "approved",
-      emailId:           r.EmailId,
-      basic:             r.Basic,
-      dateOfJoin:        r.DateOfJoining,
-      reqDate:           r.ReqDate,
       reason:            r.Reason,
+      exchangeReason:    r.ExchangeReason,
+      dept:              r.Department,
+      result:            r.TentativeStatus || r.Status || "Approved",
       publishedDateFrom: r.PublishedDateFrom,
       publishedDateTo:   r.PublishedDateTo,
+      rosterNo:          r.RosterNo || r.DbRosterNo || '',
+      basic:             r.Basic,
+      dateOfJoining:     r.DateOfJoining,
+      gradDate:          r.GradDate,
+      dateOfBirth:       r.DateOfBirth,
+      currentAreaType:   r.CurrentAreaType,
+      currentQuarterNo:  r.CurrentQuarterNo,
+      currentQtyType:    r.CurrentQuarterType,
     }));
+    const getClassRankSt = (cls) => {
+      const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
+      if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
+      if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
+      if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
+      if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
+      if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 2;
+      if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
+      return 99;
+    };
+
+    const toTimeOrNull = (val) => {
+      if (!val) return null;
+      const time = new Date(val).getTime();
+      return Number.isNaN(time) ? null : time;
+    };
+    
+    const compareNullableNumber = (a, b) => {
+      if (a === null && b === null) return 0;
+      if (a === null) return 1;
+      if (b === null) return -1;
+      return a - b;
+    };
+
+    items.sort((a, b) => {
+      const rankA = getClassRankSt(a.class);
+      const rankB = getClassRankSt(b.class);
+      if (rankA !== rankB) return rankA - rankB;
+
+      const gradDiff = compareNullableNumber(toTimeOrNull(a.gradDate), toTimeOrNull(b.gradDate));
+      if (gradDiff !== 0) return gradDiff;
+
+      const dojDiff = compareNullableNumber(toTimeOrNull(a.dateOfJoining), toTimeOrNull(b.dateOfJoining));
+      if (dojDiff !== 0) return dojDiff;
+
+      const basicA = Number(a.basic || 0);
+      const basicB = Number(b.basic || 0);
+      if (basicA !== basicB) return basicB - basicA;
+
+      const reqDiff = compareNullableNumber(toTimeOrNull(a.reqDate), toTimeOrNull(b.reqDate));
+      if (reqDiff !== 0) return reqDiff;
+
+      return Number(a.id) - Number(b.id);
+    });
 
     return res.json({ items });
   } catch (err) {
@@ -907,8 +1004,6 @@ router.get("/status-of-applications", async (req, res) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
-
-
 
 async function ensureUserDetailsDebarredColumns(pool) {
   await pool.request().query(`
@@ -1741,3 +1836,11 @@ router.post("/generate-circular", async (req, res) => {
 });
 
 module.exports = router;
+
+
+
+
+
+
+
+
