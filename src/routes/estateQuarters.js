@@ -229,7 +229,8 @@ router.get("/employee-lookup/:employeeId", requireAuth, async (req, res) => {
       .request()
       .input("employeeId", sql.NVarChar(64), employeeId)
       .query(`
-        SELECT EmployeeName, EmpClass, Category, Area_type, Quarter_no
+        SELECT EmployeeName, EmpClass, Category, Area_type, Quarter_no,
+               DateOfBirth, DateOfJoining, GradDate, Mobile, Email, Caste, DPT_NM
         FROM dbo.UserDetails
         WHERE EmployeeId = @employeeId
       `);
@@ -266,7 +267,17 @@ router.get("/employee-lookup/:employeeId", requireAuth, async (req, res) => {
         category: estateData.CATEGORY,
         areaType: estateData.AREA_TYPE,
         quarterNo: estateData.QUARTER_NUMBER
-      } : null
+      } : null,
+      dateOfBirth: userDetailsData.DateOfBirth ? 
+        `${userDetailsData.DateOfBirth.getFullYear()}-${String(userDetailsData.DateOfBirth.getMonth() + 1).padStart(2, '0')}-${String(userDetailsData.DateOfBirth.getDate()).padStart(2, '0')}` : "",
+      dateOfJoining: userDetailsData.DateOfJoining ? 
+        `${userDetailsData.DateOfJoining.getFullYear()}-${String(userDetailsData.DateOfJoining.getMonth() + 1).padStart(2, '0')}-${String(userDetailsData.DateOfJoining.getDate()).padStart(2, '0')}` : "",
+      gradDate: userDetailsData.GradDate ? 
+        `${userDetailsData.GradDate.getFullYear()}-${String(userDetailsData.GradDate.getMonth() + 1).padStart(2, '0')}-${String(userDetailsData.GradDate.getDate()).padStart(2, '0')}` : "",
+      mobile: userDetailsData.Mobile || "",
+      email: userDetailsData.Email || "",
+      caste: userDetailsData.Caste || "",
+      department: userDetailsData.DPT_NM || ""
     });
   } catch (err) {
     console.error("Error looking up employee:", err);

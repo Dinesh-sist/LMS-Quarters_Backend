@@ -27,7 +27,10 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
         [EmployeeId]               AS empId,
         [EmployeeName]             AS empName,
         [DPT_NM]                   AS department,
-        LTRIM(RTRIM([EmpClass]))  AS currentClass
+        LTRIM(RTRIM([EmpClass]))  AS currentClass,
+        [Category]                 AS category,
+        [Area_type]                AS areaType,
+        [Quarter_no]               AS quarterNo
       FROM [LMSQuartersNew].[dbo].[UserDetails]
     `);
 

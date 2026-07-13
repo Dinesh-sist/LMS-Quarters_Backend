@@ -1109,6 +1109,23 @@ router.post("/house-allotment-committee-history", committeeUpload.single("file")
   }
 });
 
+router.delete("/house-allotment-committee-history/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: "id is required" });
+    }
+    const pool = await getPool();
+    await pool.request().input("id", sql.Int, id).query(`
+      DELETE FROM dbo.HistoryofAllotment WHERE Id = @id
+    `);
+    return res.json({ message: "Record deleted successfully" });
+  } catch (err) {
+    console.error("house-allotment-committee-history delete error:", err);
+    return res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
 async function ensurePublishQuarterTypesColumn(pool) {
   await pool.request().query(`
     IF COL_LENGTH('dbo.Publish', 'QuarterTypes') IS NULL
@@ -2038,14 +2055,142 @@ router.post("/generate-circular", async (req, res) => {
   }
 });
 
+// ── POST /api/admin/register-employee-admin — Register or Update Employee details ───────────────────
+router.post("/register-employee-admin", requireAuth, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Access denied: Admin only." });
+  }
+
+  const {
+    employeeId,
+    employeeName,
+    dateOfBirth,
+    dateOfJoining,
+    gradDate,
+    classOfEmployee,
+    casteOfEmployee,
+    department,
+    mobile,
+    email
+  } = req.body;
+
+  if (!employeeId || !employeeId.trim()) return res.status(400).json({ error: "Employee ID is required." });
+  if (!employeeName || !employeeName.trim()) return res.status(400).json({ error: "Employee Name is required." });
+  if (!dateOfBirth) return res.status(400).json({ error: "Date of Birth is required." });
+  if (!dateOfJoining) return res.status(400).json({ error: "Date of Joining is required." });
+  if (!gradDate) return res.status(400).json({ error: "Grade Date is required." });
+  if (!classOfEmployee) return res.status(400).json({ error: "Class of Employee is required." });
+  if (!casteOfEmployee) return res.status(400).json({ error: "Caste of Employee is required." });
+  if (!department) return res.status(400).json({ error: "Department is required." });
+  if (!mobile || !mobile.trim()) return res.status(400).json({ error: "Mobile Number is required." });
+  if (!email || !email.trim()) return res.status(400).json({ error: "Email Address is required." });
+
+  try {
+    const pool = await getPool();
+
+    // 1. Check if employee already exists by EmployeeId in UserDetails
+    const checkEmp = await pool
+      .request()
+      .input("EmployeeId", sql.NVarChar(50), employeeId.trim())
+      .query("SELECT TOP 1 UserId FROM dbo.UserDetails WHERE EmployeeId = @EmployeeId");
+
+    const existingUserId = checkEmp.recordset[0]?.UserId;
+
+    if (existingUserId) {
+      // Update existing UserDetails
+      await pool
+        .request()
+        .input("UserId", sql.Int, existingUserId)
+        .input("EmployeeName", sql.NVarChar(120), employeeName.trim())
+        .input("DateOfBirth", sql.Date, new Date(dateOfBirth))
+        .input("DateOfJoining", sql.Date, new Date(dateOfJoining))
+        .input("GradDate", sql.Date, gradDate ? new Date(gradDate) : null)
+        .input("EmpClass", sql.NVarChar(60), classOfEmployee || "CLASS-III")
+        .input("Caste", casteOfEmployee || "GENERAL")
+        .input("DPT_NM", department || "")
+        .input("Mobile", mobile || "")
+        .input("Email", email || "")
+        .query(`
+          UPDATE dbo.UserDetails
+          SET EmployeeName = @EmployeeName,
+              DateOfBirth = @DateOfBirth,
+              DateOfJoining = @DateOfJoining,
+              GradDate = @GradDate,
+              EmpClass = @EmpClass,
+              Caste = @Caste,
+              DPT_NM = @DPT_NM,
+              Mobile = @Mobile,
+              Email = @Email
+          WHERE UserId = @UserId
+        `);
+
+      // Optionally update username in dbo.Users if email is provided
+      if (email && email.trim()) {
+        await pool
+          .request()
+          .input("UserId", sql.Int, existingUserId)
+          .input("Username", sql.NVarChar(64), email.trim().toLowerCase())
+          .query("UPDATE dbo.Users SET Username = @Username WHERE Id = @UserId");
+      }
+
+      return res.json({ success: true, message: `Employee "${employeeName}" updated successfully.` });
+    } else {
+      // Check if user already exists in Users table (by email/username)
+      // If no email, we use the EmployeeId as username.
+      const newUsername = (email && email.trim()) ? email.trim().toLowerCase() : employeeId.trim();
+      const checkUser = await pool
+        .request()
+        .input("Username", sql.NVarChar(64), newUsername)
+        .query("SELECT TOP 1 Id FROM dbo.Users WHERE Username = @Username");
+
+      let userId = checkUser.recordset[0]?.Id;
+
+      if (!userId) {
+        // Create entry in dbo.Users with default hashed password
+        const bcrypt = require("bcryptjs");
+        const passwordHash = await bcrypt.hash("changeme123", 10);
+        
+        const insertUser = await pool
+          .request()
+          .input("Username", sql.NVarChar(64), newUsername)
+          .input("PasswordHash", sql.NVarChar(255), passwordHash)
+          .input("Role", sql.NVarChar(32), "employee")
+          .query(`
+            INSERT INTO dbo.Users (Username, PasswordHash, Role)
+            VALUES (@Username, @PasswordHash, @Role);
+            SELECT SCOPE_IDENTITY() AS Id;
+          `);
+          
+        userId = insertUser.recordset[0]?.Id;
+      }
+
+      // Insert new entry into dbo.UserDetails
+      await pool
+        .request()
+        .input("UserId", sql.Int, userId)
+        .input("EmployeeId", sql.NVarChar(50), employeeId.trim())
+        .input("EmployeeName", sql.NVarChar(120), employeeName.trim())
+        .input("DateOfBirth", sql.Date, new Date(dateOfBirth))
+        .input("DateOfJoining", sql.Date, new Date(dateOfJoining))
+        .input("GradDate", sql.Date, gradDate ? new Date(gradDate) : null)
+        .input("EmpClass", sql.NVarChar(60), classOfEmployee || "CLASS-III")
+        .input("Caste", casteOfEmployee || "GENERAL")
+        .input("DPT_NM", department || "")
+        .input("Mobile", mobile || "")
+        .input("Email", email || "")
+        .query(`
+          INSERT INTO dbo.UserDetails
+          (UserId, EmployeeId, EmployeeName, DateOfBirth, DateOfJoining, GradDate, EmpClass, Caste, DPT_NM, Mobile, Email)
+          VALUES
+          (@UserId, @EmployeeId, @EmployeeName, @DateOfBirth, @DateOfJoining, @GradDate, @EmpClass, @Caste, @DPT_NM, @Mobile, @Email)
+        `);
+
+      return res.json({ success: true, message: `Employee "${employeeName}" registered successfully.` });
+    }
+  } catch (err) {
+    console.error("register-employee-admin error:", err);
+    return res.status(500).json({ error: err.message || "Internal server error" });
+  }
+});
+
 module.exports = router;
-
-
-
-
-
-
-
-
-
-
