@@ -14,12 +14,9 @@ fetch('http://localhost:5000/api/admin/status-of-applications', {
 .then(data => {
     console.log("Total application statuses returned:", data?.items?.length);
     if(data?.items?.length > 0) {
-        console.log("First item sample:", {
-            empName: data.items[0].empName,
-            publishedDateFrom: data.items[0].publishedDateFrom,
-            publishedDateTo: data.items[0].publishedDateTo,
-            result: data.items[0].result
-        });
+        console.log("First item sample:", JSON.stringify(data.items[0], null, 2));
+        console.log("Keys on first item:", Object.keys(data.items[0]));
+        console.log("Samples of first 5 items:", JSON.stringify(data.items.slice(0, 5), null, 2));
     }
     process.exit(0);
 })

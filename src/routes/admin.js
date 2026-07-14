@@ -302,14 +302,51 @@ async function computeDynamicAllotments() {
   }
   
   const applicantsRes = await pool.request().query(`
-    SELECT a.Id, a.EmpId, a.EmpName, a.Caste, a.QtrType, a.QtrLocation, a.QtrRequested, a.PriorityNo, a.Reason,
-           a.Class, a.ReqDate, a.PublishedDateFrom, a.PublishedDateTo, ud.GradDate, ud.Basic, ud.DateOfJoining, ud.DateOfBirth
+    SELECT a.Id, a.UserId, a.AppNo, a.EmpId, a.EmpName, a.Caste, a.QtrType, a.QtrLocation, a.QtrRequested, a.PriorityNo, a.Reason,
+           a.ExchangeReason, a.EmailId, a.Department, a.Class, a.ReqDate, a.PublishedDateFrom, a.PublishedDateTo,
+           ud.GradDate, ud.Basic, ud.DateOfJoining, ud.DateOfBirth,
+           ud.area_type AS CurrentAreaType, ud.Quarter_no AS CurrentQuarterNo, ud.Category AS CurrentQuarterType
     FROM dbo.Quarter_Applications a
     LEFT JOIN dbo.UserDetails ud ON a.UserId = ud.UserId
     WHERE a.Status = 'Pending'
   `);
   
   const applicants = applicantsRes.recordset;
+
+  const getClassRankSt = (cls) => {
+    const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
+    if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
+    if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
+    if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
+    if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
+    if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 3;
+    if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
+    return 99;
+  };
+
+  const compareApplicants = (a, b) => {
+    const rankA = getClassRankSt(a.Class);
+    const rankB = getClassRankSt(b.Class);
+    if (rankA !== rankB) return rankA - rankB;
+
+    const gradDiff = compareNullableNumber(toTimeOrNull(a.GradDate), toTimeOrNull(b.GradDate));
+    if (gradDiff !== 0) return gradDiff;
+
+    const dojDiff = compareNullableNumber(toTimeOrNull(a.DateOfJoining), toTimeOrNull(b.DateOfJoining));
+    if (dojDiff !== 0) return dojDiff;
+
+    const basicA = Number(a.Basic || 0);
+    const basicB = Number(b.Basic || 0);
+    if (basicA !== basicB) return basicB - basicA;
+
+    const dobDiff = compareNullableNumber(toTimeOrNull(a.DateOfBirth), toTimeOrNull(b.DateOfBirth));
+    if (dobDiff !== 0) return dobDiff;
+
+    const reqDiff = compareNullableNumber(toTimeOrNull(a.ReqDate), toTimeOrNull(b.ReqDate));
+    if (reqDiff !== 0) return reqDiff;
+
+    return Number(a.Id) - Number(b.Id);
+  };
   
   const quartersMap = {};
   for (const app of applicants) {
@@ -324,12 +361,13 @@ async function computeDynamicAllotments() {
     }
     quartersMap[key].applicants.push(app);
   }
+
+  // Pre-sort applicants inside each quarter
+  for (const q of Object.values(quartersMap)) {
+    q.applicants.sort(compareApplicants);
+  }
   
-  const quartersList = Object.values(quartersMap).sort((a, b) => {
-    if (a.QtrType !== b.QtrType) return (a.QtrType || "").localeCompare(b.QtrType || "");
-    if (a.QtrLocation !== b.QtrLocation) return (a.QtrLocation || "").localeCompare(b.QtrLocation || "");
-    return (a.QtrRequested || "").localeCompare(b.QtrRequested || "");
-  });
+  const quartersList = Object.values(quartersMap);
   
   const results = {
     winners: [],
@@ -348,89 +386,109 @@ async function computeDynamicAllotments() {
     return qType;
   };
 
-  for (const q of quartersList) {
-    const rawType = q.QtrType;
-    const dbRosterKey = mapQtrTypeToRosterKey(rawType);
-    let currentNumber = rosterCounters[dbRosterKey] || 1;
-    
-    const getClassRankSt = (cls) => {
-      const norm = String(cls || "").toUpperCase().trim().replace(/[\s_-]+/g, "");
-      if (norm.includes("SRCLASSI") || norm.includes("SRCLASS1")) return 1;
-      if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
-      if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
-      if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
-      if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 2;
-      if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
-      return 99;
-    };
-    q.applicants.sort((a, b) => {
-      const rankA = getClassRankSt(a.Class);
-      const rankB = getClassRankSt(b.Class);
-      if (rankA !== rankB) return rankA - rankB;
+  let changed = true;
+  const removedApplications = new Set();
+  
+  while (changed) {
+    changed = false;
+    const tempRosterCounters = { ...rosterCounters };
+    const winners = {};
+    const userWins = {};
+
+    // Sort quarters dynamically by the seniority of their highest-ranked eligible applicant.
+    quartersList.sort((qA, qB) => {
+      const topA = qA.applicants.find(app => !removedApplications.has(app.Id));
+      const topB = qB.applicants.find(app => !removedApplications.has(app.Id));
       
-      const toTimeOrNull = (val) => {
-        if (!val) return null;
-        const time = new Date(val).getTime();
-        return Number.isNaN(time) ? null : time;
-      };
-
-      const gradDiff = compareNullableNumber(toTimeOrNull(a.GradDate), toTimeOrNull(b.GradDate));
-      if (gradDiff !== 0) return gradDiff;
-
-      const dojDiff = compareNullableNumber(toTimeOrNull(a.DateOfJoining), toTimeOrNull(b.DateOfJoining));
-      if (dojDiff !== 0) return dojDiff;
-
-      const basicA = Number(a.Basic || 0);
-      const basicB = Number(b.Basic || 0);
-      if (basicA !== basicB) return basicB - basicA;
-
-      const dobDiff = compareNullableNumber(toTimeOrNull(a.DateOfBirth), toTimeOrNull(b.DateOfBirth));
-      if (dobDiff !== 0) return dobDiff;
-
-      const reqDiff = compareNullableNumber(toTimeOrNull(a.ReqDate), toTimeOrNull(b.ReqDate));
-      if (reqDiff !== 0) return reqDiff;
-
-      return Number(a.Id) - Number(b.Id);
+      if (!topA && !topB) return 0;
+      if (!topA) return 1; // Put quarters with no eligible applicants at the end
+      if (!topB) return -1;
+      
+      return compareApplicants(topA, topB);
     });
     
-    let requiredCategory = "General";
-    const qTypeUpper = (rawType || "").toUpperCase();
-    if (qTypeUpper.includes("A") || qTypeUpper.includes("B")) {
-      if ([10, 20, 40, 50].includes(currentNumber)) requiredCategory = "SC";
-      else if ([30, 60].includes(currentNumber)) requiredCategory = "ST";
-    } else if (qTypeUpper.includes("C") || qTypeUpper.includes("D")) {
-      if ([20, 40].includes(currentNumber)) requiredCategory = "SC";
-      else if (currentNumber === 60) requiredCategory = "ST";
-    }
-    
-    let winner = null;
-    if (requiredCategory !== "General") {
-      winner = q.applicants.find(app => (app.Caste || "").toUpperCase() === requiredCategory);
-      if (!winner && requiredCategory === "SC") {
-        winner = q.applicants.find(app => (app.Caste || "").toUpperCase() === "ST");
+    for (const q of quartersList) {
+      const rawType = q.QtrType;
+      const dbRosterKey = mapQtrTypeToRosterKey(rawType);
+      let currentNumber = tempRosterCounters[dbRosterKey] || 1;
+      
+      let requiredCategory = "General";
+      const qTypeUpper = (rawType || "").toUpperCase();
+      if (qTypeUpper.includes("A") || qTypeUpper.includes("B")) {
+        if ([10, 20, 40, 50].includes(currentNumber)) requiredCategory = "SC";
+        else if ([30, 60].includes(currentNumber)) requiredCategory = "ST";
+      } else if (qTypeUpper.includes("C") || qTypeUpper.includes("D")) {
+        if ([20, 40].includes(currentNumber)) requiredCategory = "SC";
+        else if (currentNumber === 60) requiredCategory = "ST";
+      }
+      
+      const eligibleApplicants = q.applicants.filter(app => !removedApplications.has(app.Id));
+      
+      let winner = null;
+      if (eligibleApplicants.length > 0) {
+        if (requiredCategory !== "General") {
+          winner = eligibleApplicants.find(app => (app.Caste || "").toUpperCase() === requiredCategory);
+          if (!winner && requiredCategory === "SC") {
+            winner = eligibleApplicants.find(app => (app.Caste || "").toUpperCase() === "ST");
+          }
+        }
+        if (!winner) {
+          winner = eligibleApplicants[0];
+        }
+      }
+      
+      if (winner) {
+        const winnerCopy = { ...winner };
+        if ((winnerCopy.Reason || "").toLowerCase() === 'exchange') {
+          winnerCopy.RosterNo = null;
+        } else {
+          winnerCopy.RosterNo = currentNumber;
+          tempRosterCounters[dbRosterKey] = currentNumber >= 60 ? 1 : currentNumber + 1;
+        }
+        winnerCopy.TentativeStatus = "Allotted";
+        
+        const qKey = `${q.QtrType}|${q.QtrLocation}|${q.QtrRequested}`;
+        winners[qKey] = winnerCopy;
+        
+        if (!userWins[winnerCopy.UserId]) {
+          userWins[winnerCopy.UserId] = [];
+        }
+        userWins[winnerCopy.UserId].push({ qKey, app: winnerCopy });
       }
     }
-    if (!winner) {
-      winner = q.applicants[0];
-    }
     
-    if ((winner.Reason || "").toLowerCase() === 'exchange') {
-      winner.RosterNo = null;
-    } else {
-      winner.RosterNo = currentNumber;
-      rosterCounters[dbRosterKey] = currentNumber >= 60 ? 1 : currentNumber + 1;
-    }
-    
-    winner.TentativeStatus = "Allotted";
-    results.winners.push(winner);
-    
-    for (const app of q.applicants) {
-      if (app.Id !== winner.Id) {
-        app.TentativeStatus = "Rejected";
-        results.losers.push(app);
+    for (const [userId, wins] of Object.entries(userWins)) {
+      if (wins.length > 1) {
+        wins.sort((a, b) => {
+          const prioA = a.app.PriorityNo != null ? Number(a.app.PriorityNo) : Infinity;
+          const prioB = b.app.PriorityNo != null ? Number(b.app.PriorityNo) : Infinity;
+          if (prioA !== prioB) return prioA - prioB;
+          return Number(a.app.Id) - Number(b.app.Id);
+        });
+        
+        for (let i = 1; i < wins.length; i++) {
+          removedApplications.add(wins[i].app.Id);
+        }
+        changed = true;
       }
     }
-  }  return { results, newCounters: rosterCounters };
+    
+    if (!changed) {
+      results.winners = Object.values(winners);
+      Object.assign(rosterCounters, tempRosterCounters);
+      
+      const winnerAppIds = new Set(results.winners.map(w => w.Id));
+      for (const q of quartersList) {
+        for (const app of q.applicants) {
+          if (!winnerAppIds.has(app.Id)) {
+            app.TentativeStatus = "Rejected";
+            results.losers.push(app);
+          }
+        }
+      }
+    }
+  }
+  return { results, newCounters: rosterCounters };
 }
 
 router.get("/dynamic-allotments", requireAuth, requireRole(["admin", "superadmin"]), async (req, res) => {
@@ -959,7 +1017,7 @@ router.get("/status-of-applications", async (req, res) => {
       if (norm.includes("JRCLASSI") || norm.includes("JRCLASS1")) return 2;
       if (norm.includes("CLASSIV")  || norm === "CLASS4" || norm === "4") return 5;
       if (norm.includes("CLASSIII") || norm === "CLASS3" || norm === "3") return 4;
-      if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 2;
+      if (norm.includes("CLASSII")  || norm === "CLASS2" || norm === "2") return 3;
       if (norm.includes("CLASSI")   || norm === "CLASS1" || norm === "1") return 1.5;
       return 99;
     };
