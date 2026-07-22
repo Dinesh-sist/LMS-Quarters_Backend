@@ -4,6 +4,7 @@ const { requireAuth } = require("../middleware/auth");
 
 const router = express.Router();
 
+
 const LABEL_TO_DB = {
   "Sr.Class 1": "SR-CLASS-I",
   "Jr.Class 1": "JR-CLASS-I",
@@ -11,6 +12,8 @@ const LABEL_TO_DB = {
   "Class 3": "CLASS-III",
   "Class 4": "CLASS-IV",
 };
+
+
 
 // Auto-derived reverse map: "SR-CLASS-I" -> "Sr.Class 1", etc.
 const DB_TO_LABEL = Object.fromEntries(
@@ -87,6 +90,7 @@ router.post("/employee-classes/update", requireAuth, async (req, res) => {
 
     const updatedRow = result.recordset?.[0];
 
+
     if (!updatedRow) {
       return res.status(404).json({ message: `No employee found with id ${empId}.` });
     }
@@ -100,13 +104,7 @@ router.post("/employee-classes/update", requireAuth, async (req, res) => {
     res.status(500).json({ message: err.message, code: err.code });
   }
 });
-
 module.exports = router;
-
-
-
-
-
 
 
 
