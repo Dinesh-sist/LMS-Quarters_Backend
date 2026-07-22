@@ -158,6 +158,7 @@ async function sendQuarterApprovalEmail(application, pdfBuffer = null) {
     });
   }
 
+
   await transporter.sendMail({
     from: env("MAIL_FROM", env("MAIL_USER")),
     to: recipients.join(", "),
@@ -169,6 +170,7 @@ async function sendQuarterApprovalEmail(application, pdfBuffer = null) {
 
   return { recipients };
 }
+
 
 
 async function sendCircularEmail(emails, file, fromDate, toDate) {
@@ -218,6 +220,7 @@ async function sendCircularEmail(emails, file, fromDate, toDate) {
       </div>
     </div>
   `;
+
 
   await transporter.sendMail({
     from: env("MAIL_FROM", env("MAIL_USER")),
@@ -301,6 +304,7 @@ async function sendCircularEmailWithBuffer(emails, pdfBuffer, circularData) {
 
   return { recipients: emails.length };
 }
+
 
 module.exports = {
   sendQuarterApprovalEmail,
