@@ -305,9 +305,57 @@ async function sendCircularEmailWithBuffer(emails, pdfBuffer, circularData) {
   return { recipients: emails.length };
 }
 
+async function sendPasswordResetOtpEmail(email, employeeName, otp) {
+  const recipients = uniqEmails([email]);
+  if (!recipients.length) {
+    throw new Error("No recipient email address found for password reset OTP.");
+  }
+
+  const safeName = escapeHtml(employeeName || "Employee");
+  const safeOtp = escapeHtml(otp);
+  const transporter = createTransport();
+  const subject = "LMS Quarters password reset OTP";
+  const text = [
+    `Hello ${employeeName || "Employee"},`,
+    "",
+    `Your LMS Quarters password reset OTP is ${otp}.`,
+    "This OTP is valid for 10 minutes.",
+    "",
+    "If you did not request this, please ignore this email.",
+  ].join("\n");
+
+  const html = `
+    <div style="margin:0;padding:0;background:#eef2ff;">
+      <div style="max-width:620px;margin:0 auto;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#0f172a;line-height:1.5;">
+        <div style="background:#0f2a5f;border-radius:18px 18px 0 0;padding:18px 20px;color:#fff;">
+          <div style="font-size:20px;font-weight:700;">Paradip Port Authority</div>
+          <div style="margin-top:5px;font-size:11px;font-weight:700;letter-spacing:0.14em;text-transform:uppercase;">LMS Quarters Password Reset</div>
+        </div>
+        <div style="background:#ffffff;border:1px solid #dbeafe;border-top:none;border-radius:0 0 18px 18px;padding:24px 20px;box-shadow:0 18px 45px rgba(15,23,42,0.08);">
+          <p style="margin:0 0 16px;font-size:15px;font-weight:700;color:#0f172a;">Hello ${safeName},</p>
+          <p style="margin:0 0 18px;font-size:14px;color:#334155;">Use this OTP to reset your LMS Quarters password.</p>
+          <div style="margin:0 0 18px;padding:16px;border-radius:12px;background:#eff6ff;border:1px solid #bfdbfe;text-align:center;font-size:28px;font-weight:800;letter-spacing:0.25em;color:#1d4ed8;">${safeOtp}</div>
+          <p style="margin:0;color:#64748b;font-size:13px;">This OTP is valid for 10 minutes. If you did not request this, please ignore this email.</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: env("MAIL_FROM", env("MAIL_USER")),
+    to: recipients.join(", "),
+    subject,
+    text,
+    html,
+  });
+
+  return { recipients };
+}
+
 
 module.exports = {
   sendQuarterApprovalEmail,
   sendCircularEmail,
   sendCircularEmailWithBuffer,
+  sendPasswordResetOtpEmail,
 };
