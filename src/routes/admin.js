@@ -301,7 +301,24 @@ async function computeDynamicAllotments() {
     rosterCounters[r.QuarterType] = r.CurrentNumber;
   }
   
-  const applicantsRes = await pool.request().query(`
+  const activePubRes = await pool.request().query(`
+    SELECT TOP 1
+      CONVERT(varchar(10), From_Date, 23) AS From_Date,
+      CONVERT(varchar(10), To_Date,   23) AS To_Date
+    FROM dbo.Publish
+    WHERE Current_State = 'Published'
+    ORDER BY PublishID DESC
+  `);
+  const activePub = activePubRes.recordset[0];
+  
+  if (!activePub) {
+    return { results: { winners: [], losers: [] } };
+  }
+
+  const applicantsRes = await pool.request()
+    .input('fromDate', sql.Date, activePub.From_Date)
+    .input('toDate', sql.Date, activePub.To_Date)
+    .query(`
     SELECT a.Id, a.UserId, a.AppNo, a.EmpId, a.EmpName, a.Caste, a.QtrType, a.QtrLocation, a.QtrRequested, a.PriorityNo, a.Reason,
            a.ExchangeReason, a.EmailId, a.Department, a.Class, a.ReqDate, a.PublishedDateFrom, a.PublishedDateTo,
            ud.GradDate, ud.Basic, ud.DateOfJoining, ud.DateOfBirth,
@@ -309,6 +326,8 @@ async function computeDynamicAllotments() {
     FROM dbo.Quarter_Applications a
     LEFT JOIN dbo.UserDetails ud ON a.UserId = ud.UserId
     WHERE a.Status = 'Pending'
+      AND CONVERT(date, a.PublishedDateFrom) = CONVERT(date, @fromDate)
+      AND CONVERT(date, a.PublishedDateTo) = CONVERT(date, @toDate)
   `);
   
   const applicants = applicantsRes.recordset;
@@ -1060,6 +1079,125 @@ router.get("/status-of-applications", async (req, res) => {
   } catch (err) {
     console.error("status-of-applications error:", err);
     return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/generate-approval-mails", requireAuth, async (req, res) => {
+  try {
+    const pool = await getPool();
+    
+    // 1. Get dynamically allotted winners and new counters
+    const dynamicData = await computeDynamicAllotments();
+    const winners = dynamicData.results.winners || [];
+    const newCounters = dynamicData.newCounters || {};
+    
+    if (winners.length === 0) {
+      return res.status(400).json({ error: "No allotted winners found." });
+    }
+
+    // Return immediately to avoid blocking the frontend
+    res.json({ message: "Mail generation started. This may take a few minutes." });
+
+    // 2. Process emails asynchronously
+    (async () => {
+      for (const winner of winners) {
+        try {
+          // Update status and roster number in DB to Approved
+          await pool.request()
+            .input("id", sql.Int, winner.Id)
+            .input("rosterNo", sql.Int, winner.RosterNo || null)
+            .query(`UPDATE dbo.Quarter_Applications SET Status = 'Approved', RosterNo = @rosterNo, UpdatedAt = SYSUTCDATETIME() WHERE Id = @id`);
+
+          // Fetch full application data required for PDF and email
+          const appResult = await pool.request()
+            .input("id", sql.Int, winner.Id)
+            .query(`
+              SELECT
+                qa.*,
+                ud.area_type as CurrentAreaType,
+                ud.Quarter_no as CurrentQuarterNo,
+                ud.Category as CurrentQuarterType,
+                ud.Email as UserEmail
+              FROM dbo.Quarter_Applications qa
+              LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+              WHERE qa.Id = @id
+            `);
+          
+          const current = appResult.recordset[0];
+          if (current) {
+            current.Status = 'Approved';
+            
+            // --- Update Estate_Quarters (Old Quarter to VACANT) ---
+            if (current.CurrentQuarterNo && current.CurrentAreaType) {
+              await pool.request()
+                .input("oldQtr", sql.NVarChar, String(current.CurrentQuarterNo))
+                .input("oldArea", sql.NVarChar, current.CurrentAreaType)
+                .query(`
+                  UPDATE dbo.Estate_Quarters
+                  SET STATUS = 'VACANT', NAME = NULL, EMP_OTH = NULL
+                  WHERE [QUARTER NUMBER] = @oldQtr AND AREA_TYPE = @oldArea
+                `);
+            }
+
+            // --- Update Estate_Quarters (New Quarter to OCCUPIED) ---
+            await pool.request()
+              .input("newQtr", sql.NVarChar, String(current.QtrRequested))
+              .input("newArea", sql.NVarChar, current.QtrLocation)
+              .input("empName", sql.NVarChar, current.EmpName)
+              .input("empId", sql.NVarChar, current.EmpId)
+              .query(`
+                UPDATE dbo.Estate_Quarters
+                SET STATUS = 'OCCUPIED', NAME = @empName, EMP_OTH = @empId
+                WHERE [QUARTER NUMBER] = @newQtr AND AREA_TYPE = @newArea
+              `);
+
+            // --- Update UserDetails (Assign new Quarter) ---
+            await pool.request()
+              .input("userId", sql.Int, current.UserId)
+              .input("newQtr", sql.NVarChar, String(current.QtrRequested))
+              .input("newArea", sql.NVarChar, current.QtrLocation)
+              .input("newCat", sql.NVarChar, current.QtrType)
+              .query(`
+                UPDATE dbo.UserDetails
+                SET Quarter_no = @newQtr, area_type = @newArea, Category = @newCat
+                WHERE UserId = @userId
+              `);
+
+            // Build PDF
+            const pdfBuffer = await buildAllotmentOrderPDF({
+              ...current,
+              IssueDate: new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" }),
+            });
+            // Send email
+            await sendQuarterApprovalEmail(current, pdfBuffer);
+          }
+        } catch (innerErr) {
+          console.error(`Failed to generate mail for winner ID ${winner.Id}:`, innerErr);
+        }
+      }
+      
+      // Update Roster_Counters table for the next cycle
+      for (const [quarterType, currentNumber] of Object.entries(newCounters)) {
+        try {
+          await pool.request()
+            .input("quarterType", sql.NVarChar, quarterType)
+            .input("currentNumber", sql.Int, currentNumber)
+            .query(`
+              UPDATE dbo.Roster_counters
+              SET CurrentNumber = @currentNumber
+              WHERE QuarterType = @quarterType
+            `);
+        } catch (counterErr) {
+          console.error(`Failed to update Roster Counter for ${quarterType}:`, counterErr);
+        }
+      }
+    })();
+
+  } catch (err) {
+    console.error("generate-approval-mails error:", err);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: "Internal server error" });
+    }
   }
 });
 
@@ -2129,7 +2267,8 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
     casteOfEmployee,
     department,
     mobile,
-    email
+    email,
+    category
   } = req.body;
 
   if (!employeeId || !employeeId.trim()) return res.status(400).json({ error: "Employee ID is required." });
@@ -2168,6 +2307,7 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
         .input("DPT_NM", department || "")
         .input("Mobile", mobile || "")
         .input("Email", email || "")
+        .input("Category", category || null)
         .query(`
           UPDATE dbo.UserDetails
           SET EmployeeName = @EmployeeName,
@@ -2178,7 +2318,8 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
               Caste = @Caste,
               DPT_NM = @DPT_NM,
               Mobile = @Mobile,
-              Email = @Email
+              Email = @Email,
+              Category = @Category
           WHERE UserId = @UserId
         `);
 
@@ -2236,11 +2377,12 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
         .input("DPT_NM", department || "")
         .input("Mobile", mobile || "")
         .input("Email", email || "")
+        .input("Category", category || null)
         .query(`
           INSERT INTO dbo.UserDetails
-          (UserId, EmployeeId, EmployeeName, DateOfBirth, DateOfJoining, GradDate, EmpClass, Caste, DPT_NM, Mobile, Email)
+          (UserId, EmployeeId, EmployeeName, DateOfBirth, DateOfJoining, GradDate, EmpClass, Caste, DPT_NM, Mobile, Email, Category)
           VALUES
-          (@UserId, @EmployeeId, @EmployeeName, @DateOfBirth, @DateOfJoining, @GradDate, @EmpClass, @Caste, @DPT_NM, @Mobile, @Email)
+          (@UserId, @EmployeeId, @EmployeeName, @DateOfBirth, @DateOfJoining, @GradDate, @EmpClass, @Caste, @DPT_NM, @Mobile, @Email, @Category)
         `);
 
       return res.json({ success: true, message: `Employee "${employeeName}" registered successfully.` });
