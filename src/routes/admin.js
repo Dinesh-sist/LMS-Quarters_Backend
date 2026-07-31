@@ -69,6 +69,22 @@ async function ensureQuarterApplicationPublishColumns(pool) {
   `);
 }
 
+async function autoCloseExpiredPublications(pool) {
+  try {
+    const dbPool = pool || (await getPool());
+    await dbPool.request().query(`
+      UPDATE dbo.Publish
+      SET Current_State = 'Closed'
+      WHERE Current_State = 'Published'
+        AND CAST(GETDATE() AS DATE) > CAST(To_Date AS DATE)
+    `);
+  } catch (err) {
+    console.error("Error auto-closing expired publications:", err);
+  }
+}
+router.autoCloseExpiredPublications = autoCloseExpiredPublications;
+
+
 async function ensureQuarterApplicationRosterColumn(pool) {
   await pool.request().query(`
     IF COL_LENGTH('dbo.Quarter_Applications', 'RosterNo') IS NULL
@@ -1481,6 +1497,7 @@ router.post("/publish", upload.any(), async (req, res) => {
 router.get("/publication/latest", async (req, res) => {
   try {
     const pool = await getPool();
+    await autoCloseExpiredPublications(pool);
 
     const result = await pool.request().query(`
       SELECT TOP 1

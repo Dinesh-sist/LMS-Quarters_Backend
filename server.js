@@ -2,9 +2,27 @@ require("dotenv").config();
 const { createApp } = require("./src/app");
 const { port } = require("./src/config");
 const { getPool } = require("./src/db");
+const adminRouter = require("./src/routes/admin");
 
 async function main() {
-  await getPool(); // fail-fast on DB connectivity
+  const pool = await getPool(); // fail-fast on DB connectivity
+
+  // Check and auto-close any expired publications on startup
+  if (typeof adminRouter.autoCloseExpiredPublications === "function") {
+    await adminRouter.autoCloseExpiredPublications(pool);
+  }
+
+  // Periodically check and auto-close expired publications every 60 seconds
+  setInterval(async () => {
+    try {
+      if (typeof adminRouter.autoCloseExpiredPublications === "function") {
+        await adminRouter.autoCloseExpiredPublications(pool);
+      }
+    } catch (err) {
+      console.error("Periodic auto-close error:", err);
+    }
+  }, 60000);
+
   const app = createApp();
   app.listen(port, () => {
     // eslint-disable-next-line no-console
@@ -17,4 +35,5 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
 
