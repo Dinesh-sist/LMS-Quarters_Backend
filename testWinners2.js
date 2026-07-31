@@ -68,6 +68,7 @@ async function computeDynamicAllotments() {
     return a - b;
   };
 
+  
   for (const q of quartersList) {
     const rawType = q.QtrType;
     const dbRosterKey = mapQtrTypeToRosterKey(rawType);
