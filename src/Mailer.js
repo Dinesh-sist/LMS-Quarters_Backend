@@ -29,9 +29,9 @@ function uniqEmails(values) {
 }
 
 function createTransport() {
-  const host = env("MAIL_HOST");
-  const user = env("MAIL_USER");
-  const pass = env("MAIL_PASS");
+  const host = env("MAIL_HOST").trim();
+  const user = env("MAIL_USER").trim().replace(/,$/, "").trim();
+  const pass = env("MAIL_PASS").trim();
   const port = Number(env("MAIL_PORT", "587"));
   const secure = env("MAIL_SECURE", "false").toLowerCase() === "true";
 
