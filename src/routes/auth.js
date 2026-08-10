@@ -20,7 +20,7 @@ const RegisterEmployeeSchema = z.object({
   employeeName: z.string().min(1).max(120),
   dateOfJoining: z.string().min(1).max(32),
   className: z.string().min(1).max(60),
-  classChoice: z.string().min(1).max(60),
+  classChoice: z.string().max(60).optional(),
   mobile: z.string().min(5).max(20),
   email: z.string().email().max(64), // stored as Username in dbo.Users (nvarchar(64))
   password: z.string().min(6).max(128)
