@@ -120,7 +120,7 @@ router.post("/lookup", async (req, res) => {
     .query(`
       SELECT ud.UserId, ud.EmployeeName, ud.EmpClass, ud.DateOfJoining, u.Username
       FROM dbo.UserDetails ud
-      INNER JOIN dbo.Users u ON ud.UserId = u.Id
+      LEFT JOIN dbo.Users u ON ud.UserId = u.Id
       WHERE ud.EmployeeId = @EmployeeId AND CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirth
     `);
 

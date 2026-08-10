@@ -200,23 +200,39 @@ END
     .request()
     .input("EmployeeId", sql.NVarChar(50), employeeId)
     .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
-    .query("SELECT TOP 1 UserId FROM dbo.UserDetails WHERE EmployeeId=@EmployeeId AND CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirth");
+    .query("SELECT TOP 1 Id, UserId FROM dbo.UserDetails WHERE EmployeeId=@EmployeeId AND CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirth");
 
-  const userId = empCheck.recordset[0]?.UserId;
-  if (!userId) {
+  const empRecord = empCheck.recordset[0];
+  if (!empRecord) {
     return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
   }
+
+  let userId = empRecord.UserId;
 
   const tx = new sql.Transaction(pool);
   await tx.begin();
   try {
-    await new sql.Request(tx)
-      .input("Id", sql.Int, userId)
-      .input("Username", sql.NVarChar(64), username)
-      .input("PasswordHash", sql.NVarChar(255), passwordHash)
-      .query("UPDATE dbo.Users SET Username=@Username, PasswordHash=@PasswordHash WHERE Id=@Id");
+    if (!userId) {
+      const insertUserRes = await new sql.Request(tx)
+        .input("Username", sql.NVarChar(64), username)
+        .input("PasswordHash", sql.NVarChar(255), passwordHash)
+        .input("Role", sql.NVarChar(32), "employee")
+        .query(`
+          INSERT INTO dbo.Users (Username, PasswordHash, Role)
+          VALUES (@Username, @PasswordHash, @Role);
+          SELECT SCOPE_IDENTITY() AS Id;
+        `);
+      userId = insertUserRes.recordset[0]?.Id;
+    } else {
+      await new sql.Request(tx)
+        .input("Id", sql.Int, userId)
+        .input("Username", sql.NVarChar(64), username)
+        .input("PasswordHash", sql.NVarChar(255), passwordHash)
+        .query("UPDATE dbo.Users SET Username=@Username, PasswordHash=@PasswordHash WHERE Id=@Id");
+    }
 
     await new sql.Request(tx)
+      .input("Id", sql.Int, empRecord.Id)
       .input("UserId", sql.Int, userId)
       .input("EmployeeName", sql.NVarChar(120), employeeName)
       .input("DateOfJoining", sql.Date, new Date(dateOfJoining))
@@ -224,7 +240,7 @@ END
       .input("Mobile", sql.NVarChar(20), mobile)
       .input("Email", sql.NVarChar(120), email)
       .query(
-        "UPDATE dbo.UserDetails SET EmployeeName=@EmployeeName, DateOfJoining=@DateOfJoining, EmpClass=@EmpClass, Mobile=@Mobile, Email=@Email WHERE UserId=@UserId"
+        "UPDATE dbo.UserDetails SET UserId=@UserId, EmployeeName=@EmployeeName, DateOfJoining=@DateOfJoining, EmpClass=@EmpClass, Mobile=@Mobile, Email=@Email WHERE Id=@Id"
       );
 
     await tx.commit();
@@ -322,7 +338,13 @@ router.post("/forgot-password/reset", async (req, res) => {
   if (!jwtSecret) return res.status(500).json({ error: "JWT_SECRET not set" });
 
   const parsed = ResetPasswordSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
+  if (!parsed.success) {
+    const pwdIssue = parsed.error.issues.find((i) => i.path.includes("newPassword"));
+    if (pwdIssue) {
+      return res.status(400).json({ error: "Password must be between 6 and 128 characters long." });
+    }
+    return res.status(400).json({ error: "Invalid password reset request." });
+  }
 
   let decoded;
   try {

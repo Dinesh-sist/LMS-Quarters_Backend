@@ -71,12 +71,39 @@ router.get("/estate-quarters/employees-by-type", requireAuth, async (req, res) =
        FROM Quarter_Allotment_Type T
        LEFT JOIN UserDetails U ON LTRIM(RTRIM(T.QTR_TYPE)) = LTRIM(RTRIM(U.Category))
        GROUP BY LTRIM(RTRIM(T.QTR_TYPE))
+       HAVING COUNT(U.Category) > 0
        ORDER BY count DESC, type ASC`
     );
     return res.json(result.recordset);
   } catch (err) {
     console.error("Employees by quarter type error:", err);
     return res.status(500).json({ error: "Failed to fetch quarter type data" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// ESTATE QUARTERS - Category Status Breakdown (Occupied, Vacant, Others)
+// ─────────────────────────────────────────────────────────────────────
+router.get("/estate-quarters/category-status-counts", requireAuth, async (req, res) => {
+  try {
+    const pool = await getPool();
+    const result = await pool.request().query(
+      `SELECT 
+        LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(100)))) AS category,
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(STATUS1))) = 'OCCUPIED' THEN 1 ELSE 0 END) AS occupied,
+        SUM(CASE WHEN UPPER(LTRIM(RTRIM(STATUS1))) = 'VACANT' THEN 1 ELSE 0 END) AS vacant,
+        SUM(CASE WHEN STATUS1 IS NULL OR UPPER(LTRIM(RTRIM(STATUS1))) NOT IN ('OCCUPIED', 'VACANT') THEN 1 ELSE 0 END) AS others
+       FROM dbo.[Estate_Quarters]
+       WHERE CATEGORY IS NOT NULL 
+         AND LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(100)))) <> ''
+         AND LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(100)))) <> '.'
+       GROUP BY LTRIM(RTRIM(CAST(CATEGORY AS NVARCHAR(100))))
+       ORDER BY category ASC`
+    );
+    return res.json(result.recordset || []);
+  } catch (err) {
+    console.error("Quarter category status counts error:", err);
+    return res.status(500).json({ error: "Failed to fetch category status data" });
   }
 });
 
@@ -125,6 +152,48 @@ router.get("/applications/status-counts", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Applications by status error:", err);
     return res.status(500).json({ error: "Failed to fetch applications status data" });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────
+// HISTORY OF HOUSE ALLOTMENT COMMITTEE (dbo.Publish filtering by Year, Dates & QuarterTypes)
+// ─────────────────────────────────────────────────────────────────────
+router.get("/allotment-committee/history", requireAuth, async (req, res) => {
+  const currentYear = new Date().getFullYear();
+  const selectedYear = parseInt(req.query.year || currentYear, 10);
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("year", selectedYear)
+      .query(`
+        SELECT 
+          P.PublishID,
+          CONVERT(varchar(10), P.From_Date, 23) AS From_Date,
+          CONVERT(varchar(10), P.To_Date, 23) AS To_Date,
+          ISNULL(P.QuarterTypes, '') AS QuarterTypes,
+          COUNT(A.UserId) AS totalApps,
+          SUM(CASE WHEN LOWER(LTRIM(RTRIM(ISNULL(A.[Status], '')))) LIKE 'approv%' THEN 1 ELSE 0 END) AS approvedApps
+        FROM dbo.Publish P
+        LEFT JOIN dbo.Quarter_Applications A 
+          ON (A.PublishedDateFrom = P.From_Date AND A.PublishedDateTo = P.To_Date)
+        WHERE YEAR(P.From_Date) = @year OR YEAR(P.To_Date) = @year
+        GROUP BY P.PublishID, P.From_Date, P.To_Date, P.QuarterTypes
+        ORDER BY P.From_Date ASC, P.PublishID ASC
+      `);
+
+    const committees = (result.recordset || []).map((row, index) => ({
+      committeeName: `Committee ${index + 1}`,
+      fromDate: row.From_Date,
+      toDate: row.To_Date,
+      totalApplications: row.totalApps || 0,
+      approvedApplications: row.approvedApps || 0,
+      quarterTypes: row.QuarterTypes || "General",
+    }));
+
+    return res.json({ year: selectedYear, committees });
+  } catch (err) {
+    console.error("Allotment committee history error:", err);
+    return res.json({ year: selectedYear, committees: [] });
   }
 });
 

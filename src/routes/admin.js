@@ -174,7 +174,7 @@ async function rebuildQuarterApplicationPriorityNumbers(db) {
       ud.[GradDate],
       ud.[DateOfJoining],
       ud.[DateOfBirth]
-    FROM dbo.Quarter_Applications qa WITH (UPDLOCK, HOLDLOCK)
+    FROM dbo.Quarter_Applications qa
     LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
     ORDER BY qa.[Id] ASC
   `);
@@ -878,7 +878,7 @@ router.post("/checkapprovalsave", async (req, res) => {
             DECLARE @RosterNo INT;
 
             SELECT @RosterNo = (COUNT(*) % 60) + 1
-            FROM dbo.Quarter_Applications WITH (UPDLOCK, HOLDLOCK)
+            FROM dbo.Quarter_Applications
             WHERE QtrRequested = @QtrRequested AND ISNULL(Reason, '') != 'exchange';
 
             SELECT @RosterNo AS RosterNo;
@@ -1609,7 +1609,7 @@ router.put("/publication/update", async (req, res) => {
     });
   }
 });
-router.delete("/applications/:id", async (req, res) => {
+router.delete("/applications/:id", requireAuth, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
 
@@ -1622,7 +1622,10 @@ router.delete("/applications/:id", async (req, res) => {
         SELECT TOP 1
           qa.[Id],
           qa.[UserId],
-          qa.[Status]
+          qa.[EmpId],
+          qa.[Status],
+          qa.[QtrLocation],
+          qa.[QtrRequested]
         FROM dbo.Quarter_Applications qa
         WHERE qa.[Id] = @Id
       `);
@@ -1630,30 +1633,92 @@ router.delete("/applications/:id", async (req, res) => {
     const row = current.recordset[0];
     if (!row) return res.status(404).json({ error: "Not found" });
 
-    const userId = Number(req.user.sub);
-    const isAdmin = String(req.user.role || "").toLowerCase() === "admin";
-    if (!isAdmin && Number(row.UserId) !== userId) {
-      return res.status(403).json({ error: "You can only delete your own application" });
-    }
-
-    const result = await pool
+    // Mark as Rejected and clear RosterNo. DO NOT delete from dbo.Quarter_Applications!
+    // This allows computeDynamicAllotments to automatically skip to the next priority waiting employee while preserving application history.
+    await pool
       .request()
       .input("Id", sql.Int, id)
       .query(`
-        DELETE FROM dbo.Quarter_Applications
+        UPDATE dbo.Quarter_Applications
+        SET Status = 'Rejected', RosterNo = NULL, UpdatedAt = SYSUTCDATETIME()
         WHERE Id = @Id;
-        SELECT @@ROWCOUNT AS Affected;
       `);
 
-    const affected = result.recordset[0]?.Affected ?? 0;
-    if (!affected) return res.status(404).json({ error: "Not found" });
+    // Free up Estate_Quarters if it was already marked occupied by this employee
+    if (row.EmpId && row.QtrLocation && row.QtrRequested) {
+      await pool
+        .request()
+        .input("areaType", sql.NVarChar, row.QtrLocation)
+        .input("quarterNo", sql.NVarChar, row.QtrRequested)
+        .input("empId", sql.NVarChar, row.EmpId)
+        .query(`
+          UPDATE dbo.Estate_Quarters
+          SET STATUS1 = 'VACANT', NAME = NULL, EMP_OTH = NULL, [ALLOTMENT ORDER] = NULL, ALT_DT = NULL
+          WHERE UPPER(LTRIM(RTRIM(AREA_TYPE))) = UPPER(LTRIM(RTRIM(@areaType)))
+            AND UPPER(LTRIM(RTRIM([QUARTER NUMBER]))) = UPPER(LTRIM(RTRIM(@quarterNo)))
+            AND UPPER(LTRIM(RTRIM(EMP_OTH))) = UPPER(LTRIM(RTRIM(@empId)))
+        `);
+    }
 
-    await ensureQuarterApplicationPriorityColumn(pool);
-    await rebuildQuarterApplicationPriorityNumbers(pool);
-
-    return res.json({ ok: true });
+    return res.json({ ok: true, message: "Application skipped/rejected successfully" });
   } catch (err) {
     console.error("Delete application error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+router.post("/applications/:id/skip", requireAuth, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
+
+  try {
+    const pool = await getPool();
+    const current = await pool
+      .request()
+      .input("Id", sql.Int, id)
+      .query(`
+        SELECT TOP 1
+          qa.[Id],
+          qa.[UserId],
+          qa.[EmpId],
+          qa.[Status],
+          qa.[QtrLocation],
+          qa.[QtrRequested]
+        FROM dbo.Quarter_Applications qa
+        WHERE qa.[Id] = @Id
+      `);
+
+    const row = current.recordset[0];
+    if (!row) return res.status(404).json({ error: "Not found" });
+
+    // Mark as Rejected and clear RosterNo. NEVER delete from dbo.Quarter_Applications!
+    await pool
+      .request()
+      .input("Id", sql.Int, id)
+      .query(`
+        UPDATE dbo.Quarter_Applications
+        SET Status = 'Rejected', RosterNo = NULL, UpdatedAt = SYSUTCDATETIME()
+        WHERE Id = @Id;
+      `);
+
+    if (row.EmpId && row.QtrLocation && row.QtrRequested) {
+      await pool
+        .request()
+        .input("areaType", sql.NVarChar, row.QtrLocation)
+        .input("quarterNo", sql.NVarChar, row.QtrRequested)
+        .input("empId", sql.NVarChar, row.EmpId)
+        .query(`
+          UPDATE dbo.Estate_Quarters
+          SET STATUS1 = 'VACANT', NAME = NULL, EMP_OTH = NULL, [ALLOTMENT ORDER] = NULL, ALT_DT = NULL
+          WHERE UPPER(LTRIM(RTRIM(AREA_TYPE))) = UPPER(LTRIM(RTRIM(@areaType)))
+            AND UPPER(LTRIM(RTRIM([QUARTER NUMBER]))) = UPPER(LTRIM(RTRIM(@quarterNo)))
+            AND UPPER(LTRIM(RTRIM(EMP_OTH))) = UPPER(LTRIM(RTRIM(@empId)))
+        `);
+    }
+
+    return res.json({ ok: true, message: "Application skipped/rejected successfully" });
+  } catch (err) {
+    console.error("Skip application error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -2141,25 +2206,26 @@ async function buildCircularPDF(body) {
 
     const tableTop = doc.y;
     const colSl = 60;
-    const colQuarter = 100;
-    const colCategory = 350;
-    const colRemarks = 480;
-    const tableWidth = 480;
+    const colQuarter = 115;   // 55px width for Sl. No column so "Sl. No." fits perfectly on one line
+    const colCategory = 360;  // 245px width for Quarter No
+    const colRemarks = 475;   // 115px width for Category
+    const colEnd = 535;       // 60px width for Remarks (matches right margin border at 535)
 
     // Table Header
-    doc.font("Helvetica-Bold").fontSize(11);
-    doc.rect(colSl, tableTop, colQuarter - colSl, 25).stroke();
-    doc.rect(colQuarter, tableTop, colCategory - colQuarter, 25).stroke();
-    doc.rect(colCategory, tableTop, colRemarks - colCategory, 25).stroke();
-    doc.rect(colRemarks, tableTop, 60, 25).stroke();
+    const headerHeight = 28;
+    doc.font("Helvetica-Bold").fontSize(10.5);
+    doc.rect(colSl, tableTop, colQuarter - colSl, headerHeight).stroke();
+    doc.rect(colQuarter, tableTop, colCategory - colQuarter, headerHeight).stroke();
+    doc.rect(colCategory, tableTop, colRemarks - colCategory, headerHeight).stroke();
+    doc.rect(colRemarks, tableTop, colEnd - colRemarks, headerHeight).stroke();
 
-    doc.text("Sl. No.", colSl + 5, tableTop + 7, { width: colQuarter - colSl - 10, align: "center" });
-    doc.text("Quarter No", colQuarter + 5, tableTop + 7, { width: colCategory - colQuarter - 10, align: "center" });
-    doc.text("Category", colCategory + 5, tableTop + 7, { width: colRemarks - colCategory - 10, align: "center" });
-    doc.text("Remarks", colRemarks + 5, tableTop + 7, { width: 50, align: "center" });
+    doc.text("Sl. No.", colSl + 2, tableTop + 8, { width: colQuarter - colSl - 4, align: "center" });
+    doc.text("Quarter No", colQuarter + 5, tableTop + 8, { width: colCategory - colQuarter - 10, align: "center" });
+    doc.text("Category", colCategory + 5, tableTop + 8, { width: colRemarks - colCategory - 10, align: "center" });
+    doc.text("Remarks", colRemarks + 5, tableTop + 8, { width: colEnd - colRemarks - 10, align: "center" });
 
-    let yPosition = tableTop + 25;
-    doc.font("Helvetica").fontSize(11);
+    let yPosition = tableTop + headerHeight;
+    doc.font("Helvetica").fontSize(10.5);
     
     let totalNos = 0;
     let slNo = 1;
@@ -2186,8 +2252,8 @@ async function buildCircularPDF(body) {
         
         if (rowCount > 0) {
             let quarterText = allQuarterStrs.join("\n");
-            let textHeight = doc.heightOfString(quarterText, { width: colCategory - colQuarter - 10 }) + 10;
-            if (textHeight < 30) textHeight = 30;
+            let textHeight = doc.heightOfString(quarterText, { width: colCategory - colQuarter - 10 }) + 14;
+            if (textHeight < 32) textHeight = 32;
 
             if (yPosition + textHeight > 750) {
                 doc.addPage();
@@ -2197,12 +2263,12 @@ async function buildCircularPDF(body) {
             doc.rect(colSl, yPosition, colQuarter - colSl, textHeight).stroke();
             doc.rect(colQuarter, yPosition, colCategory - colQuarter, textHeight).stroke();
             doc.rect(colCategory, yPosition, colRemarks - colCategory, textHeight).stroke();
-            doc.rect(colRemarks, yPosition, 60, textHeight).stroke();
+            doc.rect(colRemarks, yPosition, colEnd - colRemarks, textHeight).stroke();
 
-            doc.text(slNo.toString() + ".", colSl + 5, yPosition + 10, { width: colQuarter - colSl - 10, align: "center" });
-            doc.text(quarterText, colQuarter + 5, yPosition + 10, { width: colCategory - colQuarter - 10, align: "left" });
-            doc.text(category, colCategory + 5, yPosition + 10, { width: colRemarks - colCategory - 10, align: "center" });
-            doc.text(rowCount.toString().padStart(2, '0'), colRemarks + 5, yPosition + 10, { width: 50, align: "center" });
+            doc.text(slNo.toString() + ".", colSl + 2, yPosition + 8, { width: colQuarter - colSl - 4, align: "center" });
+            doc.text(quarterText, colQuarter + 5, yPosition + 8, { width: colCategory - colQuarter - 10, align: "left" });
+            doc.text(category, colCategory + 5, yPosition + 8, { width: colRemarks - colCategory - 10, align: "center" });
+            doc.text(rowCount.toString().padStart(2, '0'), colRemarks + 5, yPosition + 8, { width: colEnd - colRemarks - 10, align: "center" });
 
             yPosition += textHeight;
             totalNos += rowCount;
@@ -2211,11 +2277,11 @@ async function buildCircularPDF(body) {
     }
 
     // Total Row
-    doc.font("Helvetica-Bold").fontSize(11);
-    doc.rect(colSl, yPosition, colRemarks - colSl, 25).stroke();
-    doc.rect(colRemarks, yPosition, 60, 25).stroke();
-    doc.text("Total", colSl, yPosition + 7, { width: colRemarks - colSl, align: "center" });
-    doc.text(`${totalNos.toString().padStart(2, '0')} nos.`, colRemarks + 5, yPosition + 7, { width: 50, align: "center" });
+    doc.font("Helvetica-Bold").fontSize(10.5);
+    doc.rect(colSl, yPosition, colRemarks - colSl, headerHeight).stroke();
+    doc.rect(colRemarks, yPosition, colEnd - colRemarks, headerHeight).stroke();
+    doc.text("Total", colSl, yPosition + 8, { width: colRemarks - colSl, align: "center" });
+    doc.text(`${totalNos.toString().padStart(2, '0')} nos.`, colRemarks + 5, yPosition + 8, { width: colEnd - colRemarks - 10, align: "center" });
 
     doc.moveDown(5);
     
@@ -2306,15 +2372,15 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
     const checkEmp = await pool
       .request()
       .input("EmployeeId", sql.NVarChar(50), employeeId.trim())
-      .query("SELECT TOP 1 UserId FROM dbo.UserDetails WHERE EmployeeId = @EmployeeId");
+      .query("SELECT TOP 1 Id FROM dbo.UserDetails WHERE EmployeeId = @EmployeeId");
 
-    const existingUserId = checkEmp.recordset[0]?.UserId;
+    const existingEmp = checkEmp.recordset[0];
 
-    if (existingUserId) {
-      // Update existing UserDetails
+    if (existingEmp) {
+      // Update existing UserDetails by EmployeeId
       await pool
         .request()
-        .input("UserId", sql.Int, existingUserId)
+        .input("EmployeeId", sql.NVarChar(50), employeeId.trim())
         .input("EmployeeName", sql.NVarChar(120), employeeName.trim())
         .input("DateOfBirth", sql.Date, new Date(dateOfBirth))
         .input("DateOfJoining", sql.Date, new Date(dateOfJoining))
@@ -2337,53 +2403,14 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
               Mobile = @Mobile,
               Email = @Email,
               Category = @Category
-          WHERE UserId = @UserId
+          WHERE EmployeeId = @EmployeeId
         `);
-
-      // Optionally update username in dbo.Users if email is provided
-      if (email && email.trim()) {
-        await pool
-          .request()
-          .input("UserId", sql.Int, existingUserId)
-          .input("Username", sql.NVarChar(64), email.trim().toLowerCase())
-          .query("UPDATE dbo.Users SET Username = @Username WHERE Id = @UserId");
-      }
 
       return res.json({ success: true, message: `Employee "${employeeName}" updated successfully.` });
     } else {
-      // Check if user already exists in Users table (by email/username)
-      // If no email, we use the EmployeeId as username.
-      const newUsername = (email && email.trim()) ? email.trim().toLowerCase() : employeeId.trim();
-      const checkUser = await pool
-        .request()
-        .input("Username", sql.NVarChar(64), newUsername)
-        .query("SELECT TOP 1 Id FROM dbo.Users WHERE Username = @Username");
-
-      let userId = checkUser.recordset[0]?.Id;
-
-      if (!userId) {
-        // Create entry in dbo.Users with default hashed password
-        const bcrypt = require("bcryptjs");
-        const passwordHash = await bcrypt.hash("changeme123", 10);
-        
-        const insertUser = await pool
-          .request()
-          .input("Username", sql.NVarChar(64), newUsername)
-          .input("PasswordHash", sql.NVarChar(255), passwordHash)
-          .input("Role", sql.NVarChar(32), "employee")
-          .query(`
-            INSERT INTO dbo.Users (Username, PasswordHash, Role)
-            VALUES (@Username, @PasswordHash, @Role);
-            SELECT SCOPE_IDENTITY() AS Id;
-          `);
-          
-        userId = insertUser.recordset[0]?.Id;
-      }
-
-      // Insert new entry into dbo.UserDetails
+      // Insert new employee details ONLY into dbo.UserDetails (dbo.Users is NOT touched)
       await pool
         .request()
-        .input("UserId", sql.Int, userId)
         .input("EmployeeId", sql.NVarChar(50), employeeId.trim())
         .input("EmployeeName", sql.NVarChar(120), employeeName.trim())
         .input("DateOfBirth", sql.Date, new Date(dateOfBirth))
@@ -2397,9 +2424,9 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
         .input("Category", category || null)
         .query(`
           INSERT INTO dbo.UserDetails
-          (UserId, EmployeeId, EmployeeName, DateOfBirth, DateOfJoining, GradDate, EmpClass, Caste, DPT_NM, Mobile, Email, Category)
+          (EmployeeId, EmployeeName, DateOfBirth, DateOfJoining, GradDate, EmpClass, Caste, DPT_NM, Mobile, Email, Category)
           VALUES
-          (@UserId, @EmployeeId, @EmployeeName, @DateOfBirth, @DateOfJoining, @GradDate, @EmpClass, @Caste, @DPT_NM, @Mobile, @Email, @Category)
+          (@EmployeeId, @EmployeeName, @DateOfBirth, @DateOfJoining, @GradDate, @EmpClass, @Caste, @DPT_NM, @Mobile, @Email, @Category)
         `);
 
       return res.json({ success: true, message: `Employee "${employeeName}" registered successfully.` });
