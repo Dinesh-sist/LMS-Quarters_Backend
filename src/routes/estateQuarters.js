@@ -112,13 +112,7 @@ router.get("/vacant", requireAuth, async (req, res) => {
       IsAvailable: true
     }));
 
-    console.log("=== /vacant API CALLED ===");
-    console.log("className:", className);
-    console.log("quarterTypesParam:", quarterTypesParam);
-    console.log("assignmentConditions:", assignmentConditions);
-    console.log("items.length:", items.length);
-    console.log("items:", items);
-    console.log("==========================");
+
 
     res.json({
       items,
