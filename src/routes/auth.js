@@ -109,7 +109,7 @@ router.post("/login", async (req, res) => {
   if (!jwtSecret) return res.status(500).json({ error: "JWT_SECRET not set" });
 
   const parsed = LoginSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
+  if (!parsed.success) return res.status(400).json({ error: "Please Enter valid username and password" });
 
   const { username, password } = parsed.data;
 
@@ -150,7 +150,7 @@ router.post("/register-employee", async (req, res) => {
   if (!jwtSecret) return res.status(500).json({ error: "JWT_SECRET not set" });
 
   const parsed = RegisterEmployeeSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
+  if (!parsed.success) return res.status(400).json({ error: "Invalid Payload" });
 
   const {
     employeeId,
@@ -301,7 +301,7 @@ router.post("/forgot-password/verify-otp", async (req, res) => {
   if (!jwtSecret) return res.status(500).json({ error: "JWT_SECRET not set" });
 
   const parsed = VerifyPasswordOtpSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
+  if (!parsed.success) return res.status(400).json({ error: "Enter a valid OTP" });
 
   const pool = await getPool();
   await ensurePasswordResetOtpTable(pool);
