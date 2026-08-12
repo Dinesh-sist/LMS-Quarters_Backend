@@ -288,8 +288,9 @@ router.post("/forgot-password/request-otp", async (req, res) => {
       VALUES (@UserId, @OtpHash, DATEADD(MINUTE, 10, SYSUTCDATETIME()));
     `);
 
-  await sendPasswordResetOtpEmail(recipient, user.EmployeeName, otp);
-
+  sendPasswordResetOtpEmail(recipient, user.EmployeeName, otp).catch(err => {
+    console.error("Failed to send OTP email in background:", err);
+  });
   return res.json({
     ok: true,
     message: "OTP sent to the registered email address."
