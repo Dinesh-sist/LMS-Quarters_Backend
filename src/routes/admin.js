@@ -1098,8 +1098,34 @@ router.get("/status-of-applications", async (req, res) => {
   }
 });
 
+const generateApprovalMailSchema = z.object({
+  fileNo: z.string().trim().min(1, "File No. is required").max(200),
+  issueDate: z.string().trim().min(1, "Date is required").max(40),
+});
+
+function formatAllotmentIssueDate(value) {
+  const trimmed = String(value || "").trim();
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    return `${day}/${month}/${year}`;
+  }
+  return trimmed;
+}
+
 router.post("/generate-approval-mails", requireAuth, async (req, res) => {
   try {
+    const parsed = generateApprovalMailSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0];
+      return res.status(400).json({ error: firstIssue?.message || "Invalid mail details." });
+    }
+
+    const mailDetails = {
+      fileNo: parsed.data.fileNo,
+      issueDate: formatAllotmentIssueDate(parsed.data.issueDate),
+    };
+
     const pool = await getPool();
     
     // 1. Get dynamically allotted winners and new counters
@@ -1150,7 +1176,7 @@ router.post("/generate-approval-mails", requireAuth, async (req, res) => {
                 .input("oldArea", sql.NVarChar, current.CurrentAreaType)
                 .query(`
                   UPDATE dbo.Estate_Quarters
-                  SET STATUS = 'VACANT', NAME = NULL, EMP_OTH = NULL
+                  SET STATUS1 = 'VACANT', NAME = NULL, EMP_OTH = NULL
                   WHERE [QUARTER NUMBER] = @oldQtr AND AREA_TYPE = @oldArea
                 `);
             }
@@ -1163,7 +1189,7 @@ router.post("/generate-approval-mails", requireAuth, async (req, res) => {
               .input("empId", sql.NVarChar, current.EmpId)
               .query(`
                 UPDATE dbo.Estate_Quarters
-                SET STATUS = 'OCCUPIED', NAME = @empName, EMP_OTH = @empId
+                SET STATUS1 = 'OCCUPIED', NAME = @empName, EMP_OTH = @empId
                 WHERE [QUARTER NUMBER] = @newQtr AND AREA_TYPE = @newArea
               `);
 
@@ -1182,7 +1208,8 @@ router.post("/generate-approval-mails", requireAuth, async (req, res) => {
             // Build PDF
             const pdfBuffer = await buildAllotmentOrderPDF({
               ...current,
-              IssueDate: new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" }),
+              FileNo: mailDetails.fileNo,
+              IssueDate: mailDetails.issueDate,
             });
             // Send email
             await sendQuarterApprovalEmail(current, pdfBuffer);
@@ -1886,7 +1913,7 @@ async function buildAllotmentOrderPDF(application) {
   const qtrType = application.QtrType || "—";
   const appNo = application.AppNo || "—";
   const issueDate = application.IssueDate || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" }).replace(/\//g, "/");
-  const fileNo = `AD/EST/GENL/QRS/VIII-2/${new Date().getFullYear()}(Pt.)/`;
+  const fileNo = application.FileNo || `AD/EST/GENL/QRS/VIII-2/${new Date().getFullYear()}(Pt.)/`;
 
   const LEFT = 50;
   const W = 495; // A4 width is 595.28 - 100 = 495
@@ -1990,31 +2017,47 @@ async function buildAllotmentOrderPDF(application) {
   });
 
   // Signature block
-  doc.moveDown(1.5);
-  // Calculate X to center the 90px image over the right-aligned text block
-  const sigBlockX = LEFT + W - 110;
+  doc.moveDown(1);
+  const signatureTextWidth = 185;
+  const signatureTextX = LEFT + W - signatureTextWidth;
+  const signatureImageWidth = 160;
+  const signatureImageHeight = 58;
+  const signatureImageX = signatureTextX + (signatureTextWidth - signatureImageWidth) / 2;
+  const signatureImageY = doc.y;
 
   if (sigExists) {
     try {
-      doc.image(SIG_PATH, sigBlockX, doc.y, { fit: [90, 60] });
-      doc.y += 65; // Push text down below the signature
-    } catch (_) { }
+      doc.image(SIG_PATH, signatureImageX, signatureImageY, {
+        cover: [signatureImageWidth, signatureImageHeight],
+        align: "center",
+        valign: "center",
+      });
+      doc.y = signatureImageY + signatureImageHeight + 2;
+    } catch (signatureErr) {
+      console.error("Failed to add allotment order signature:", signatureErr);
+      doc.y = signatureImageY + 38;
+    }
   } else {
-    doc.moveDown(3);
+    doc.y = signatureImageY + 38;
   }
 
   doc.font("Helvetica-Bold").fontSize(11)
-    .text("Sr. Asst. Estate Manager", { align: "right" })
-    .text("Paradip Port Authority", { align: "right" });
-  doc.moveDown(1.5);
+    .text("Sr. Asst. Estate Manager", signatureTextX, doc.y, { width: signatureTextWidth, align: "center" })
+    .text("Paradip Port Authority", signatureTextX, doc.y, { width: signatureTextWidth, align: "center" });
+  doc.moveDown(1.4);
 
   // Computer generated note
   doc.font("Helvetica-Bold").fontSize(9)
-    .text("This is a computer generated order, signature not required.", { align: "center" });
-  doc.moveDown(1);
+    .text("This is a computer generated order, signature not required.", LEFT, doc.y, { width: W, align: "center" });
+  doc.moveDown(1.2);
 
   // Copy to list
-  doc.font("Helvetica-Bold").fontSize(11).text("Copy to:-");
+  if (doc.y > doc.page.height - 190) {
+    doc.addPage();
+  }
+  doc.x = LEFT;
+  doc.font("Helvetica-Bold").fontSize(11).text("Copy to:-", LEFT, doc.y, { width: W });
+  doc.moveDown(0.2);
   const copies = [
     "Persons concerned through their respective D.D.O.s/Concerned D.D.O.s for information and necessary action.",
     "The Dy. Conservator(Marine Dept) (HoD), ppa for kind information.",
@@ -2024,8 +2067,17 @@ async function buildAllotmentOrderPDF(application) {
     "Office order guard file/Project Associates.IITM.",
   ];
   copies.forEach((item, idx) => {
-    doc.font("Helvetica-Bold").fontSize(10.5).text(`${idx + 1}.`, { continued: true });
-    doc.font("Helvetica").fontSize(10.5).text(`    ${item}`, { align: "justify", lineGap: 2.5 });
+    const itemY = doc.y;
+    doc.font("Helvetica-Bold").fontSize(10.5).text(`${idx + 1}.`, LEFT, itemY, {
+      width: 24,
+      continued: false,
+    });
+    doc.font("Helvetica").fontSize(10.5).text(item, LEFT + 24, itemY, {
+      width: W - 24,
+      align: "justify",
+      lineGap: 2.5,
+    });
+    doc.moveDown(0.15);
   });
 
   doc.end();
@@ -2086,6 +2138,9 @@ async function buildCircularPDF(body) {
 
   const SAGARMALA_LOGO_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "sagaramala.png");
   const sagarmalaExists = fs.existsSync(SAGARMALA_LOGO_PATH);
+
+  const SIG_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "signature.png");
+  const sigExists = fs.existsSync(SIG_PATH);
 
   // ── Header ──────────────────────────────────────────────────────────────
   doc.font("Helvetica-Bold").fontSize(11);
@@ -2175,14 +2230,47 @@ async function buildCircularPDF(body) {
     `${contactNumber || "______"} for ${contactArea || "______"}.`;
   doc.font("Helvetica-Bold").fontSize(11).text(contactLine, { underline: true, lineGap: 5 });
 
-  doc.moveDown(3);
-  doc.font("Helvetica-Bold").fontSize(12)
-    .text("Sr. Asst. Estate Manager,", { align: "right" })
-    .text("Paradip Port Authority", { align: "right" });
+  doc.moveDown(2);
+  if (doc.y > doc.page.height - 185) {
+    doc.addPage();
+  }
 
-  doc.moveDown(3);
-  doc.font("Helvetica-Bold").fontSize(11).text("Copy to :");
-  doc.moveDown(1);
+  const circularSignatureTextWidth = 190;
+  const circularSignatureTextX = doc.page.width - doc.page.margins.right - circularSignatureTextWidth;
+  const circularSignatureImageWidth = 160;
+  const circularSignatureImageHeight = 58;
+  const circularSignatureImageX = circularSignatureTextX + (circularSignatureTextWidth - circularSignatureImageWidth) / 2;
+  const circularSignatureImageY = doc.y;
+
+  if (sigExists) {
+    try {
+      doc.image(SIG_PATH, circularSignatureImageX, circularSignatureImageY, {
+        cover: [circularSignatureImageWidth, circularSignatureImageHeight],
+        align: "center",
+        valign: "center",
+      });
+      doc.y = circularSignatureImageY + circularSignatureImageHeight + 2;
+    } catch (signatureErr) {
+      console.error("Failed to add circular signature:", signatureErr);
+      doc.y = circularSignatureImageY + 38;
+    }
+  } else {
+    doc.y = circularSignatureImageY + 38;
+  }
+
+  doc.font("Helvetica-Bold").fontSize(12)
+    .text("Sr. Asst. Estate Manager,", circularSignatureTextX, doc.y, { width: circularSignatureTextWidth, align: "center" })
+    .text("Paradip Port Authority", circularSignatureTextX, doc.y, { width: circularSignatureTextWidth, align: "center" });
+
+  doc.moveDown(2);
+  if (doc.y > doc.page.height - 170) {
+    doc.addPage();
+  }
+  doc.x = doc.page.margins.left;
+  doc.font("Helvetica-Bold").fontSize(11).text("Copy to :", doc.page.margins.left, doc.y, {
+    width: doc.page.width - doc.page.margins.left - doc.page.margins.right,
+  });
+  doc.moveDown(0.6);
   const copies = [
     "All Heads of Departments/Heads of Officers, Paradip Port Authority for kind information of all concerned.",
     "The P.S. to Chairman for kind information of the Chairman, PPA.",
@@ -2192,8 +2280,18 @@ async function buildCircularPDF(body) {
     "Project Associate, IIT Madras/Office Order Guard File.",
   ];
   copies.forEach((item, idx) => {
-    doc.font("Helvetica").fontSize(10)
-      .text(`${idx + 1}.  ${item}`, { align: "justify", indent: 20 });
+    const itemY = doc.y;
+    const left = doc.page.margins.left;
+    const width = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    doc.font("Helvetica-Bold").fontSize(10).text(`${idx + 1}.`, left, itemY, {
+      width: 24,
+      continued: false,
+    });
+    doc.font("Helvetica").fontSize(10).text(item, left + 24, itemY, {
+      width: width - 24,
+      align: "justify",
+      lineGap: 2,
+    });
     doc.moveDown(0.2);
   });
 
