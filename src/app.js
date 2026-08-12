@@ -23,6 +23,17 @@ const employeeClassRoutes = require("./routes/employeeupdation");
 function createApp() {
   const app = express();
 
+  // Log all incoming requests to the terminal (ignoring OPTIONS/preflight)
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on("finish", () => {
+      if (req.method !== "OPTIONS") {
+        const duration = Date.now() - start;
+        console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ${res.statusCode} - ${duration}ms`);
+      }
+    });
+    next();
+  });
   app.use(helmet());
   app.use(express.json({ limit: "1mb" }));
   app.use(
