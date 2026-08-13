@@ -7,6 +7,11 @@ const adminRouter = require("./src/routes/admin");
 async function main() {
   const pool = await getPool(); // fail-fast on DB connectivity
 
+  // Ensure UserDetails UserId unique constraint allows multiple NULLs
+  if (typeof adminRouter.ensureUserDetailsUserIdConstraint === "function") {
+    await adminRouter.ensureUserDetailsUserIdConstraint(pool);
+  }
+
   // Check and auto-close any expired publications on startup
   if (typeof adminRouter.autoCloseExpiredPublications === "function") {
     await adminRouter.autoCloseExpiredPublications(pool);

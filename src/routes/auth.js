@@ -40,6 +40,11 @@ const ResetPasswordSchema = z.object({
   newPassword: z.string().min(6).max(128)
 });
 
+const ForgotUsernameSchema = z.object({
+  employeeId: z.string().min(1).max(50),
+  dateOfBirth: z.string().min(1).max(32)
+});
+
 async function ensurePasswordResetOtpTable(pool) {
   await pool.request().query(`
 IF OBJECT_ID('dbo.PasswordResetOtps','U') IS NULL
@@ -117,7 +122,14 @@ router.post("/login", async (req, res) => {
   const result = await pool
     .request()
     .input("Username", sql.NVarChar(64), username)
-    .query("SELECT TOP 1 Id, Username, PasswordHash, Role FROM dbo.Users WHERE Username=@Username");
+    .query(`
+      SELECT TOP 1 u.Id, u.Username, u.PasswordHash, u.Role
+      FROM dbo.Users u
+      LEFT JOIN dbo.UserDetails ud ON ud.UserId = u.Id
+      WHERE u.Username = @Username
+         OR (ud.EmployeeId = @Username AND ud.EmployeeId IS NOT NULL)
+      ORDER BY u.Id DESC
+    `);
 
   const user = result.recordset[0];
   if (!user) return res.status(401).json({ error: "Invalid credentials" });
@@ -175,7 +187,7 @@ IF OBJECT_ID('dbo.UserDetails','U') IS NULL
 BEGIN
   CREATE TABLE dbo.UserDetails (
     Id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-    UserId INT NOT NULL UNIQUE,
+    UserId INT NULL,
     EmployeeId NVARCHAR(50) NOT NULL,
     DateOfBirth DATE NOT NULL,
     EmployeeName NVARCHAR(120) NOT NULL,
@@ -184,8 +196,12 @@ BEGIN
     Mobile NVARCHAR(20) NOT NULL,
     Email NVARCHAR(120) NOT NULL,
     CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_UserDetails_CreatedAt DEFAULT SYSUTCDATETIME(),
-    CONSTRAINT FK_UserDetails_Users FOREIGN KEY (UserId) REFERENCES dbo.Users(Id) ON DELETE CASCADE
+    CONSTRAINT FK_UserDetails_Users FOREIGN KEY (UserId) REFERENCES dbo.Users(Id) ON DELETE SET NULL
   );
+
+  CREATE UNIQUE NONCLUSTERED INDEX IX_UserDetails_UserId_Filtered
+  ON dbo.UserDetails (UserId)
+  WHERE UserId IS NOT NULL;
 END
 `);
 
@@ -332,7 +348,13 @@ router.post("/forgot-password/verify-otp", async (req, res) => {
     { expiresIn: "10m" }
   );
 
-  return res.json({ ok: true, resetToken });
+  return res.json({
+    ok: true,
+    resetToken,
+    username: user.Username,
+    employeeName: user.EmployeeName || "",
+    employeeId: user.EmployeeId || ""
+  });
 });
 
 router.post("/forgot-password/reset", async (req, res) => {
@@ -404,6 +426,61 @@ router.post("/forgot-password/reset", async (req, res) => {
   }
 
   return res.json({ ok: true, message: "Password reset successfully." });
+});
+
+router.post("/forgot-username", async (req, res) => {
+  const parsed = ForgotUsernameSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Please enter both Employee ID and Date of Birth." });
+
+  const employeeId = parsed.data.employeeId.trim();
+  const dateOfBirth = parsed.data.dateOfBirth.trim();
+
+  const pool = await getPool();
+
+  const result = await pool.request()
+    .input("EmployeeId", sql.NVarChar(50), employeeId)
+    .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
+    .query(`
+      SELECT
+        u.Id,
+        u.Username,
+        ud.EmployeeId,
+        ud.EmployeeName,
+        ud.Email
+      FROM dbo.UserDetails ud
+      INNER JOIN dbo.Users u ON ud.UserId = u.Id
+      WHERE ud.EmployeeId = @EmployeeId
+        AND CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirth
+    `);
+
+  const user = result.recordset?.[0];
+
+  if (!user || !user.Username) {
+    const checkUnregistered = await pool.request()
+      .input("EmployeeId", sql.NVarChar(50), employeeId)
+      .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
+      .query(`
+        SELECT EmployeeName FROM dbo.UserDetails
+        WHERE EmployeeId = @EmployeeId
+          AND CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirth
+      `);
+
+    if (checkUnregistered.recordset?.length > 0) {
+      return res.status(404).json({
+        error: "This Employee ID is not registered yet. Please click 'New Register' to create your account.",
+        notRegistered: true
+      });
+    }
+
+    return res.status(404).json({ error: "No registered account found for this Employee ID and Date of Birth." });
+  }
+
+  return res.json({
+    ok: true,
+    username: user.Username,
+    employeeName: user.EmployeeName || "",
+    employeeId: user.EmployeeId || employeeId
+  });
 });
 
 module.exports = router;

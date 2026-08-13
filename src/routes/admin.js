@@ -322,7 +322,6 @@ async function computeDynamicAllotments() {
       CONVERT(varchar(10), From_Date, 23) AS From_Date,
       CONVERT(varchar(10), To_Date,   23) AS To_Date
     FROM dbo.Publish
-    WHERE Current_State = 'Published'
     ORDER BY PublishID DESC
   `);
   const activePub = activePubRes.recordset[0];
@@ -962,7 +961,6 @@ router.get("/status-of-applications", async (req, res) => {
           CONVERT(varchar(10), From_Date, 23) AS From_Date,
           CONVERT(varchar(10), To_Date,   23) AS To_Date
         FROM dbo.Publish
-        WHERE Current_State = 'Published'
         ORDER BY PublishID DESC
       `);
       activePub = pubResult.recordset[0] || null;
@@ -2432,6 +2430,66 @@ router.post("/generate-circular", async (req, res) => {
   }
 });
 
+async function ensureUserDetailsUserIdConstraint(pool) {
+  try {
+    const dbPool = pool || (await getPool());
+    await dbPool.request().query(`
+      DECLARE @sql NVARCHAR(MAX) = N'';
+
+      -- 1. Drop UNIQUE constraints on UserId in dbo.UserDetails
+      SELECT @sql += N'ALTER TABLE dbo.UserDetails DROP CONSTRAINT ' + QUOTENAME(kc.name) + N'; '
+      FROM sys.key_constraints kc
+      JOIN sys.index_columns ic ON kc.parent_object_id = ic.object_id AND kc.unique_index_id = ic.index_id
+      JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+      WHERE kc.parent_object_id = OBJECT_ID('dbo.UserDetails')
+        AND c.name = 'UserId'
+        AND kc.type = 'UQ';
+
+      -- Drop non-filtered UNIQUE indexes on UserId
+      SELECT @sql += N'DROP INDEX ' + QUOTENAME(i.name) + N' ON dbo.UserDetails; '
+      FROM sys.indexes i
+      JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+      JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+      WHERE i.object_id = OBJECT_ID('dbo.UserDetails')
+        AND c.name = 'UserId'
+        AND i.is_unique = 1
+        AND i.has_filter = 0
+        AND i.is_primary_key = 0;
+
+      IF LEN(@sql) > 0
+      BEGIN
+        EXEC sp_executesql @sql;
+      END
+
+      -- 2. Alter column to allow NULL if it was NOT NULL
+      IF EXISTS (
+        SELECT 1 FROM sys.columns 
+        WHERE object_id = OBJECT_ID('dbo.UserDetails') 
+          AND name = 'UserId' 
+          AND is_nullable = 0
+      )
+      BEGIN
+        ALTER TABLE dbo.UserDetails ALTER COLUMN UserId INT NULL;
+      END
+
+      -- 3. Create filtered unique index on UserId so multiple NULLs are allowed
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes 
+        WHERE object_id = OBJECT_ID('dbo.UserDetails') 
+          AND name = 'IX_UserDetails_UserId_Filtered'
+      )
+      BEGIN
+        CREATE UNIQUE NONCLUSTERED INDEX IX_UserDetails_UserId_Filtered
+        ON dbo.UserDetails (UserId)
+        WHERE UserId IS NOT NULL;
+      END
+    `);
+  } catch (err) {
+    console.error("ensureUserDetailsUserIdConstraint error:", err);
+  }
+}
+router.ensureUserDetailsUserIdConstraint = ensureUserDetailsUserIdConstraint;
+
 // ── POST /api/admin/register-employee-admin — Register or Update Employee details ───────────────────
 router.post("/register-employee-admin", requireAuth, async (req, res) => {
   if (req.user.role !== "admin") {
@@ -2465,6 +2523,7 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
 
   try {
     const pool = await getPool();
+    await ensureUserDetailsUserIdConstraint(pool);
 
     // 1. Check if employee already exists by EmployeeId in UserDetails
     const checkEmp = await pool
@@ -2531,7 +2590,24 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
     }
   } catch (err) {
     console.error("register-employee-admin error:", err);
-    return res.status(500).json({ error: err.message || "Internal server error" });
+    let friendlyMessage = "Failed to register employee. Please check the entered details.";
+    const msg = String(err?.message || "");
+    if (msg.includes("UNIQUE KEY constraint") || msg.includes("duplicate key")) {
+      if (msg.includes("EmployeeId") || msg.includes("PK_UserDetails")) {
+        friendlyMessage = `An employee with Employee ID "${employeeId}" already exists.`;
+      } else if (msg.includes("Email")) {
+        friendlyMessage = `The email address "${email}" is already registered for another employee.`;
+      } else if (msg.includes("Mobile")) {
+        friendlyMessage = `The mobile number "${mobile}" is already registered for another employee.`;
+      } else {
+        friendlyMessage = "An employee with these unique details already exists in the system.";
+      }
+    } else if (msg.includes("converting date") || msg.includes("conversion failed")) {
+      friendlyMessage = "Please check that all date fields are in a valid date format.";
+    } else if (msg.includes("String or binary data would be truncated")) {
+      friendlyMessage = "One or more fields exceed the maximum allowed character limit.";
+    }
+    return res.status(400).json({ error: friendlyMessage });
   }
 });
 

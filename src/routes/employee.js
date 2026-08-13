@@ -118,7 +118,7 @@ router.post("/lookup", async (req, res) => {
     .input("EmployeeId", sql.NVarChar(50), employeeId)
     .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
     .query(`
-      SELECT ud.UserId, ud.EmployeeName, ud.EmpClass, ud.DateOfJoining, u.Username
+      SELECT ud.UserId, ud.EmployeeName, ud.EmpClass, ud.DateOfJoining, ud.Mobile, ud.Email, u.Username
       FROM dbo.UserDetails ud
       LEFT JOIN dbo.Users u ON ud.UserId = u.Id
       WHERE ud.EmployeeId = @EmployeeId AND CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirth
@@ -130,19 +130,21 @@ router.post("/lookup", async (req, res) => {
     return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
   }
 
-  if (row.Username && row.Username.includes('@')) {
+  if (row.UserId || (row.Username && row.Username.includes('@'))) {
     return res.status(409).json({ error: "You are already registered! Please login." });
   }
 
   return res.json({
     employeeId: employeeId,
-    employeeName: row.EmployeeName,
+    employeeName: row.EmployeeName || "",
     dateOfBirth: dateOfBirth,
     dateOfJoining: row.DateOfJoining
       ? new Date(row.DateOfJoining).toISOString().slice(0, 10)
       : "",
     className: row.EmpClass || "",
     classChoice: row.EmpClass || "",
+    mobile: row.Mobile || "",
+    email: row.Email || "",
   });
 });
 
