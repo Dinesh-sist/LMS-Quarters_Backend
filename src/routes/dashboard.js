@@ -118,7 +118,21 @@ router.get("/employees/count-by-class", requireAuth, async (req, res) => {
      FROM UserDetails
      WHERE [EmpClass] IS NOT NULL AND LTRIM(RTRIM([EmpClass])) <> ''
      GROUP BY LTRIM(RTRIM([EmpClass]))
-     ORDER BY count DESC`
+     ORDER BY 
+       CASE 
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) IN ('SR-CLASS-I', 'SR.CLASS 1', 'SR. CLASS 1', 'SR. CLASS I', 'SENIOR CLASS 1', 'SENIOR CLASS I', 'CLASS I (SENIOR)') THEN 1
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%SR%CLASS%I%' OR UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%SR%CLASS%1%' OR UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%SENIOR%CLASS%' THEN 1
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) IN ('JR-CLASS-I', 'JR.CLASS 1', 'JR. CLASS 1', 'JR. CLASS I', 'JUNIOR CLASS 1', 'JUNIOR CLASS I', 'CLASS I (JUNIOR)') THEN 2
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%JR%CLASS%I%' OR UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%JR%CLASS%1%' OR UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%JUNIOR%CLASS%' THEN 2
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) IN ('CLASS-II', 'CLASS 2', 'CLASS II', 'CLASS-2') THEN 3
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%CLASS%II%' OR UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%CLASS%2%' THEN 3
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) IN ('CLASS-III', 'CLASS 3', 'CLASS III', 'CLASS-3') THEN 4
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%CLASS%III%' OR UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%CLASS%3%' THEN 4
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) IN ('CLASS-IV', 'CLASS 4', 'CLASS IV', 'CLASS-4') THEN 5
+         WHEN UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%CLASS%IV%' OR UPPER(LTRIM(RTRIM([EmpClass]))) LIKE '%CLASS%4%' THEN 5
+         ELSE 6
+       END ASC,
+       count DESC`
     );
     return res.json(result.recordset);
   } catch (err) {

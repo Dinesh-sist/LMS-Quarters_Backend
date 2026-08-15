@@ -21,7 +21,7 @@ const RegisterEmployeeSchema = z.object({
   dateOfJoining: z.string().min(1).max(32),
   className: z.string().min(1).max(60),
   classChoice: z.string().max(60).optional(),
-  mobile: z.string().min(5).max(20),
+  mobile: z.string().max(20).optional().default(""),
   email: z.string().email().max(64), // stored as Username in dbo.Users (nvarchar(64))
   password: z.string().min(6).max(128)
 });
@@ -91,8 +91,8 @@ async function findPasswordResetUser(pool, rawIdentifier) {
         ud.EmployeeId,
         ud.EmployeeName,
         ud.Email
-      FROM dbo.Users u
-      LEFT JOIN dbo.UserDetails ud ON ud.UserId = u.Id
+      FROM dbo.Users u WITH (NOLOCK)
+      LEFT JOIN dbo.UserDetails ud WITH (NOLOCK) ON ud.UserId = u.Id
       WHERE LOWER(LTRIM(RTRIM(u.Username))) = @Email
          OR LOWER(LTRIM(RTRIM(ud.Email))) = @Email
          OR LTRIM(RTRIM(ud.EmployeeId)) = @Identifier
@@ -124,8 +124,8 @@ router.post("/login", async (req, res) => {
     .input("Username", sql.NVarChar(64), username)
     .query(`
       SELECT TOP 1 u.Id, u.Username, u.PasswordHash, u.Role
-      FROM dbo.Users u
-      LEFT JOIN dbo.UserDetails ud ON ud.UserId = u.Id
+      FROM dbo.Users u WITH (NOLOCK)
+      LEFT JOIN dbo.UserDetails ud WITH (NOLOCK) ON ud.UserId = u.Id
       WHERE u.Username = @Username
          OR (ud.EmployeeId = @Username AND ud.EmployeeId IS NOT NULL)
       ORDER BY u.Id DESC
@@ -148,7 +148,7 @@ router.post("/login", async (req, res) => {
     const details = await pool
       .request()
       .input("UserId", sql.Int, user.Id)
-      .query("SELECT TOP 1 EmployeeName FROM dbo.UserDetails WHERE UserId=@UserId");
+      .query("SELECT TOP 1 EmployeeName FROM dbo.UserDetails WITH (NOLOCK) WHERE UserId=@UserId");
     name = details.recordset?.[0]?.EmployeeName || null;
   }
 
@@ -158,31 +158,76 @@ router.post("/login", async (req, res) => {
   });
 });
 
+function sanitizeDateString(val) {
+  if (!val || typeof val !== "string") return null;
+  const trimmed = val.trim();
+  // Standard YYYY-MM-DD
+  const ymd = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
+  if (ymd) {
+    const y = Number(ymd[1]);
+    const m = Number(ymd[2]);
+    const d = Number(ymd[3]);
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+    return null;
+  }
+  // DD-MM-YYYY
+  const dmy = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(trimmed);
+  if (dmy) {
+    const d = Number(dmy[1]);
+    const m = Number(dmy[2]);
+    const y = Number(dmy[3]);
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+    return null;
+  }
+  const dt = new Date(trimmed);
+  if (Number.isNaN(dt.getTime())) return null;
+  const y = dt.getFullYear();
+  if (y < 1900 || y > 2100) return null;
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  const d = String(dt.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 router.post("/register-employee", async (req, res) => {
-  if (!jwtSecret) return res.status(500).json({ error: "JWT_SECRET not set" });
+  try {
+    if (!jwtSecret) return res.status(500).json({ error: "JWT_SECRET not set" });
 
-  const parsed = RegisterEmployeeSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid Payload" });
+    const parsed = RegisterEmployeeSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid Payload" });
 
-  const {
-    employeeId,
-    dateOfBirth,
-    employeeName,
-    dateOfJoining,
-    className,
-    classChoice,
-    mobile,
-    email,
-    password
-  } = parsed.data;
+    const {
+      employeeId,
+      dateOfBirth,
+      employeeName,
+      dateOfJoining,
+      className,
+      classChoice,
+      mobile,
+      email,
+      password
+    } = parsed.data;
 
-  const username = email.toLowerCase().trim();
-  const passwordHash = await bcrypt.hash(password, 10);
+    const formattedDob = sanitizeDateString(dateOfBirth);
+    if (!formattedDob) {
+      return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
+    }
 
-  const pool = await getPool();
+    const formattedDoj = sanitizeDateString(dateOfJoining);
+    if (!formattedDoj) {
+      return res.status(400).json({ error: "Invalid Date of Joining format" });
+    }
 
-  // Ensure the details table exists.
-  await pool.request().query(`
+    const username = email.toLowerCase().trim();
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const pool = await getPool();
+
+    // Ensure the details table exists.
+    await pool.request().query(`
 IF OBJECT_ID('dbo.UserDetails','U') IS NULL
 BEGIN
   CREATE TABLE dbo.UserDetails (
@@ -205,67 +250,77 @@ BEGIN
 END
 `);
 
-  const exists = await pool
-    .request()
-    .input("Username", sql.NVarChar(64), username)
-    .query("SELECT TOP 1 Id FROM dbo.Users WHERE Username=@Username");
+    const exists = await pool
+      .request()
+      .input("Username", sql.NVarChar(64), username)
+      .query("SELECT TOP 1 Id FROM dbo.Users WITH (NOLOCK) WHERE Username=@Username");
 
-  if (exists.recordset[0]) return res.status(409).json({ error: "Email already registered" });
+    if (exists.recordset[0]) return res.status(409).json({ error: "Email already registered" });
 
-  const empCheck = await pool
-    .request()
-    .input("EmployeeId", sql.NVarChar(50), employeeId)
-    .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
-    .query("SELECT TOP 1 Id, UserId FROM dbo.UserDetails WHERE EmployeeId=@EmployeeId AND CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirth");
+    const empCheck = await pool
+      .request()
+      .input("EmployeeId", sql.NVarChar(50), employeeId)
+      .input("DateOfBirth", sql.Date, new Date(formattedDob))
+      .input("DateOfBirthStr", sql.NVarChar(50), formattedDob)
+      .query(`
+        SELECT TOP 1 Id, UserId 
+        FROM dbo.UserDetails WITH (NOLOCK)
+        WHERE LTRIM(RTRIM(EmployeeId)) = @EmployeeId 
+          AND (DateOfBirth = @DateOfBirth OR CAST(DateOfBirth AS DATE) = @DateOfBirth OR CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirthStr)
+      `);
 
-  const empRecord = empCheck.recordset[0];
-  if (!empRecord) {
-    return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
-  }
-
-  let userId = empRecord.UserId;
-
-  const tx = new sql.Transaction(pool);
-  await tx.begin();
-  try {
-    if (!userId) {
-      const insertUserRes = await new sql.Request(tx)
-        .input("Username", sql.NVarChar(64), username)
-        .input("PasswordHash", sql.NVarChar(255), passwordHash)
-        .input("Role", sql.NVarChar(32), "employee")
-        .query(`
-          INSERT INTO dbo.Users (Username, PasswordHash, Role)
-          VALUES (@Username, @PasswordHash, @Role);
-          SELECT SCOPE_IDENTITY() AS Id;
-        `);
-      userId = insertUserRes.recordset[0]?.Id;
-    } else {
-      await new sql.Request(tx)
-        .input("Id", sql.Int, userId)
-        .input("Username", sql.NVarChar(64), username)
-        .input("PasswordHash", sql.NVarChar(255), passwordHash)
-        .query("UPDATE dbo.Users SET Username=@Username, PasswordHash=@PasswordHash WHERE Id=@Id");
+    const empRecord = empCheck.recordset[0];
+    if (!empRecord) {
+      return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
     }
 
-    await new sql.Request(tx)
-      .input("Id", sql.Int, empRecord.Id)
-      .input("UserId", sql.Int, userId)
-      .input("EmployeeName", sql.NVarChar(120), employeeName)
-      .input("DateOfJoining", sql.Date, new Date(dateOfJoining))
-      .input("EmpClass", sql.NVarChar(60), className)
-      .input("Mobile", sql.NVarChar(20), mobile)
-      .input("Email", sql.NVarChar(120), email)
-      .query(
-        "UPDATE dbo.UserDetails SET UserId=@UserId, EmployeeName=@EmployeeName, DateOfJoining=@DateOfJoining, EmpClass=@EmpClass, Mobile=@Mobile, Email=@Email WHERE Id=@Id"
-      );
+    let userId = empRecord.UserId;
 
-    await tx.commit();
+    const tx = new sql.Transaction(pool);
+    await tx.begin();
+    try {
+      if (!userId) {
+        const insertUserRes = await new sql.Request(tx)
+          .input("Username", sql.NVarChar(64), username)
+          .input("PasswordHash", sql.NVarChar(255), passwordHash)
+          .input("Role", sql.NVarChar(32), "employee")
+          .query(`
+            INSERT INTO dbo.Users (Username, PasswordHash, Role)
+            VALUES (@Username, @PasswordHash, @Role);
+            SELECT SCOPE_IDENTITY() AS Id;
+          `);
+        userId = insertUserRes.recordset[0]?.Id;
+      } else {
+        await new sql.Request(tx)
+          .input("Id", sql.Int, userId)
+          .input("Username", sql.NVarChar(64), username)
+          .input("PasswordHash", sql.NVarChar(255), passwordHash)
+          .query("UPDATE dbo.Users SET Username=@Username, PasswordHash=@PasswordHash WHERE Id=@Id");
+      }
+
+      await new sql.Request(tx)
+        .input("Id", sql.Int, empRecord.Id)
+        .input("UserId", sql.Int, userId)
+        .input("EmployeeName", sql.NVarChar(120), employeeName)
+        .input("DateOfJoining", sql.Date, new Date(formattedDoj))
+        .input("EmpClass", sql.NVarChar(60), className)
+        .input("Mobile", sql.NVarChar(20), mobile)
+        .input("Email", sql.NVarChar(120), email)
+        .query(
+          "UPDATE dbo.UserDetails SET UserId=@UserId, EmployeeName=@EmployeeName, DateOfJoining=@DateOfJoining, EmpClass=@EmpClass, Mobile=@Mobile, Email=@Email WHERE Id=@Id"
+        );
+
+      await tx.commit();
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+
+    return res.status(200).json({ ok: true });
   } catch (err) {
-    await tx.rollback();
-    throw err;
+    console.error("Register employee error:", err);
+    return res.status(500).json({ error: err.message || "Registration failed." });
   }
-
-  return res.status(200).json({ ok: true });
 });
 
 router.post("/forgot-password/request-otp", async (req, res) => {
@@ -329,7 +384,7 @@ router.post("/forgot-password/verify-otp", async (req, res) => {
     .input("UserId", sql.Int, user.Id)
     .query(`
       SELECT TOP 1 Id, OtpHash
-      FROM dbo.PasswordResetOtps
+      FROM dbo.PasswordResetOtps WITH (NOLOCK)
       WHERE UserId = @UserId
         AND UsedAt IS NULL
         AND ExpiresAt > SYSUTCDATETIME()
@@ -394,7 +449,7 @@ router.post("/forgot-password/reset", async (req, res) => {
     .input("UserId", sql.Int, userId)
     .query(`
       SELECT TOP 1 Id
-      FROM dbo.PasswordResetOtps
+      FROM dbo.PasswordResetOtps WITH (NOLOCK)
       WHERE Id = @OtpId
         AND UserId = @UserId
         AND UsedAt IS NULL
@@ -429,58 +484,68 @@ router.post("/forgot-password/reset", async (req, res) => {
 });
 
 router.post("/forgot-username", async (req, res) => {
-  const parsed = ForgotUsernameSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Please enter both Employee ID and Date of Birth." });
+  try {
+    const parsed = ForgotUsernameSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Please enter both Employee ID and Date of Birth." });
 
-  const employeeId = parsed.data.employeeId.trim();
-  const dateOfBirth = parsed.data.dateOfBirth.trim();
+    const employeeId = parsed.data.employeeId.trim();
+    const formattedDob = sanitizeDateString(parsed.data.dateOfBirth);
 
-  const pool = await getPool();
-
-  const result = await pool.request()
-    .input("EmployeeId", sql.NVarChar(50), employeeId)
-    .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
-    .query(`
-      SELECT
-        u.Id,
-        u.Username,
-        ud.EmployeeId,
-        ud.EmployeeName,
-        ud.Email
-      FROM dbo.UserDetails ud
-      INNER JOIN dbo.Users u ON ud.UserId = u.Id
-      WHERE ud.EmployeeId = @EmployeeId
-        AND CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirth
-    `);
-
-  const user = result.recordset?.[0];
-
-  if (!user || !user.Username) {
-    const checkUnregistered = await pool.request()
-      .input("EmployeeId", sql.NVarChar(50), employeeId)
-      .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
-      .query(`
-        SELECT EmployeeName FROM dbo.UserDetails
-        WHERE EmployeeId = @EmployeeId
-          AND CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirth
-      `);
-
-    if (checkUnregistered.recordset?.length > 0) {
-      return res.status(404).json({
-        error: "This Employee ID is not registered yet. Please click 'New Register' to create your account.",
-        notRegistered: true
-      });
+    if (!formattedDob) {
+      return res.status(404).json({ error: "No registered account found for this Employee ID and Date of Birth." });
     }
 
-    return res.status(404).json({ error: "No registered account found for this Employee ID and Date of Birth." });
-  }
+    const pool = await getPool();
 
-  return res.json({
-    ok: true,
-    username: user.Username,
-    employeeName: user.EmployeeName || "",
-    employeeId: user.EmployeeId || employeeId
-  });
+    const result = await pool.request()
+      .input("EmployeeId", sql.NVarChar(50), employeeId)
+      .input("DateOfBirth", sql.Date, new Date(formattedDob))
+      .input("DateOfBirthStr", sql.NVarChar(50), formattedDob)
+      .query(`
+        SELECT TOP 1
+          u.Username,
+          ud.EmployeeId,
+          ud.EmployeeName,
+          ud.Email
+        FROM dbo.UserDetails ud WITH (NOLOCK)
+        INNER JOIN dbo.Users u WITH (NOLOCK) ON ud.UserId = u.Id
+        WHERE LTRIM(RTRIM(ud.EmployeeId)) = @EmployeeId
+          AND (ud.DateOfBirth = @DateOfBirth OR CAST(ud.DateOfBirth AS DATE) = @DateOfBirth OR CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirthStr)
+      `);
+
+    const user = result.recordset?.[0];
+
+    if (!user || !user.Username) {
+      const checkUnregistered = await pool.request()
+        .input("EmployeeId", sql.NVarChar(50), employeeId)
+        .input("DateOfBirth", sql.Date, new Date(formattedDob))
+        .input("DateOfBirthStr", sql.NVarChar(50), formattedDob)
+        .query(`
+          SELECT TOP 1 EmployeeName FROM dbo.UserDetails WITH (NOLOCK)
+          WHERE LTRIM(RTRIM(EmployeeId)) = @EmployeeId
+            AND (DateOfBirth = @DateOfBirth OR CAST(DateOfBirth AS DATE) = @DateOfBirth OR CONVERT(varchar(10), DateOfBirth, 23) = @DateOfBirthStr)
+        `);
+
+      if (checkUnregistered.recordset?.length > 0) {
+        return res.status(404).json({
+          error: "This Employee ID is not registered yet. Please click 'New Register' to create your account.",
+          notRegistered: true
+        });
+      }
+
+      return res.status(404).json({ error: "No registered account found for this Employee ID and Date of Birth." });
+    }
+
+    return res.json({
+      ok: true,
+      username: user.Username,
+      employeeName: user.EmployeeName || "",
+      employeeId: user.EmployeeId || employeeId
+    });
+  } catch (err) {
+    console.error("Forgot username error:", err);
+    return res.status(500).json({ error: "Failed to retrieve username. Please try again." });
+  }
 });
 
 module.exports = router;

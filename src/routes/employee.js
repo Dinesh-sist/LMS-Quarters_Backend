@@ -105,47 +105,105 @@ function toRoman(n) {
   return map[n] || String(n);
 }
 
+function sanitizeDateString(val) {
+  if (!val || typeof val !== "string") return null;
+  const trimmed = val.trim();
+  // Standard YYYY-MM-DD
+  const ymd = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
+  if (ymd) {
+    const y = Number(ymd[1]);
+    const m = Number(ymd[2]);
+    const d = Number(ymd[3]);
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+    return null;
+  }
+  // DD-MM-YYYY
+  const dmy = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(trimmed);
+  if (dmy) {
+    const d = Number(dmy[1]);
+    const m = Number(dmy[2]);
+    const y = Number(dmy[3]);
+    if (y >= 1900 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+      return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    }
+    return null;
+  }
+  const dt = new Date(trimmed);
+  if (Number.isNaN(dt.getTime())) return null;
+  const y = dt.getFullYear();
+  if (y < 1900 || y > 2100) return null;
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  const d = String(dt.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 router.post("/lookup", async (req, res) => {
-  const parsed = LookupSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
+  try {
+    const parsed = LookupSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid payload" });
 
-  const employeeId = parsed.data.employeeId.trim();
-  const dateOfBirth = parsed.data.dateOfBirth;
+    const employeeId = parsed.data.employeeId.trim();
+    const formattedDob = sanitizeDateString(parsed.data.dateOfBirth);
 
-  const pool = await getPool();
+    if (!formattedDob) {
+      return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
+    }
 
-  const result = await pool.request()
-    .input("EmployeeId", sql.NVarChar(50), employeeId)
-    .input("DateOfBirth", sql.NVarChar(10), dateOfBirth)
-    .query(`
-      SELECT ud.UserId, ud.EmployeeName, ud.EmpClass, ud.DateOfJoining, ud.Mobile, ud.Email, u.Username
-      FROM dbo.UserDetails ud
-      LEFT JOIN dbo.Users u ON ud.UserId = u.Id
-      WHERE ud.EmployeeId = @EmployeeId AND CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirth
-    `);
+    const pool = await getPool();
 
-  const row = result.recordset?.[0];
-  
-  if (!row) {
-    return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
+    const result = await pool.request()
+      .input("EmployeeId", sql.NVarChar(50), employeeId)
+      .input("DateOfBirth", sql.Date, new Date(formattedDob))
+      .input("DateOfBirthStr", sql.NVarChar(50), formattedDob)
+      .query(`
+        SELECT TOP 1 ud.UserId, ud.EmployeeName, ud.EmpClass, ud.DateOfJoining, ud.Mobile, ud.Email, u.Username
+        FROM dbo.UserDetails ud WITH (NOLOCK)
+        LEFT JOIN dbo.Users u WITH (NOLOCK) ON ud.UserId = u.Id
+        WHERE LTRIM(RTRIM(ud.EmployeeId)) = @EmployeeId
+          AND (
+            ud.DateOfBirth = @DateOfBirth
+            OR CAST(ud.DateOfBirth AS DATE) = @DateOfBirth
+            OR CONVERT(varchar(10), ud.DateOfBirth, 23) = @DateOfBirthStr
+          )
+      `);
+
+    const row = result.recordset?.[0];
+    
+    if (!row) {
+      return res.status(404).json({ error: "Invalid Employee ID or Date of Birth" });
+    }
+
+    if (row.UserId || (row.Username && row.Username.includes('@'))) {
+      return res.status(409).json({ error: "You are already registered! Please login." });
+    }
+
+    const formatDate = (val) => {
+      if (!val) return "";
+      if (val instanceof Date) {
+        if (Number.isNaN(val.getTime())) return "";
+        return `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, "0")}-${String(val.getDate()).padStart(2, "0")}`;
+      }
+      const str = String(val).trim();
+      const match = /^(\d{4}-\d{2}-\d{2})/.exec(str);
+      return match ? match[1] : str.slice(0, 10);
+    };
+
+    return res.json({
+      employeeId: employeeId,
+      employeeName: row.EmployeeName || "",
+      dateOfBirth: formattedDob,
+      dateOfJoining: formatDate(row.DateOfJoining),
+      className: row.EmpClass || "",
+      classChoice: row.EmpClass || "",
+      mobile: row.Mobile || "",
+      email: row.Email || "",
+    });
+  } catch (err) {
+    console.error("Employee lookup error:", err);
+    return res.status(500).json({ error: "Employee lookup failed. Please try again." });
   }
-
-  if (row.UserId || (row.Username && row.Username.includes('@'))) {
-    return res.status(409).json({ error: "You are already registered! Please login." });
-  }
-
-  return res.json({
-    employeeId: employeeId,
-    employeeName: row.EmployeeName || "",
-    dateOfBirth: dateOfBirth,
-    dateOfJoining: row.DateOfJoining
-      ? new Date(row.DateOfJoining).toISOString().slice(0, 10)
-      : "",
-    className: row.EmpClass || "",
-    classChoice: row.EmpClass || "",
-    mobile: row.Mobile || "",
-    email: row.Email || "",
-  });
 });
 
 router.get("/me", requireAuth, async (req, res) => {

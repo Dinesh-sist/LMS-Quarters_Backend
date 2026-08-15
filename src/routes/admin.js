@@ -1260,25 +1260,99 @@ async function ensureUserDetailsDebarredColumns(pool) {
 
 router.post("/debar-user", async (req, res) => {
   try {
-    const { userId, fromDate, toDate } = req.body;
-    if (!userId || !fromDate || !toDate) {
-      return res.status(400).json({ error: "userId, fromDate, and toDate are required." });
+    const { userId, empId, employeeId, fromDate, toDate, cancel, action } = req.body;
+    const targetEmpId = empId || employeeId;
+    if (!userId && !targetEmpId) {
+      return res.status(400).json({ error: "Employee ID or User ID is required." });
+    }
+
+    const isCancelling = cancel === true || action === "cancel" || (!fromDate && !toDate);
+
+    if (!isCancelling) {
+      if (!fromDate || !toDate) {
+        return res.status(400).json({ error: "From Date and To Date are required to debar an employee." });
+      }
+      if (new Date(fromDate) > new Date(toDate)) {
+        return res.status(400).json({ error: "To Date must be a future date after From Date." });
+      }
     }
 
     const pool = await getPool();
     await ensureUserDetailsDebarredColumns(pool);
 
-    await pool.request()
-      .input("UserId", sql.Int, userId)
+    const reqObj = pool.request();
+
+    if (isCancelling) {
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
+
+      reqObj.input("YesterdayDate", sql.Date, yesterdayStr);
+
+      if (userId) {
+        reqObj.input("UserId", sql.Int, Number(userId));
+        const result = await reqObj.query(`
+          UPDATE dbo.UserDetails
+          SET DebarredToDate = @YesterdayDate
+          WHERE UserId = @UserId;
+
+          SELECT 
+            CONVERT(varchar(10), DebarredFromDate, 23) AS debarredFromDate,
+            CONVERT(varchar(10), DebarredToDate, 23)   AS debarredToDate
+          FROM dbo.UserDetails
+          WHERE UserId = @UserId;
+        `);
+        const updated = result.recordset?.[0] || {};
+        return res.json({ 
+          success: true, 
+          message: "Debarment has been cancelled successfully.",
+          debarredFromDate: updated.debarredFromDate,
+          debarredToDate: updated.debarredToDate,
+        });
+      } else {
+        reqObj.input("EmpId", sql.NVarChar(50), String(targetEmpId).trim());
+        const result = await reqObj.query(`
+          UPDATE dbo.UserDetails
+          SET DebarredToDate = @YesterdayDate
+          WHERE EmployeeId = @EmpId;
+
+          SELECT 
+            CONVERT(varchar(10), DebarredFromDate, 23) AS debarredFromDate,
+            CONVERT(varchar(10), DebarredToDate, 23)   AS debarredToDate
+          FROM dbo.UserDetails
+          WHERE EmployeeId = @EmpId;
+        `);
+        const updated = result.recordset?.[0] || {};
+        return res.json({ 
+          success: true, 
+          message: "Debarment has been cancelled successfully.",
+          debarredFromDate: updated.debarredFromDate,
+          debarredToDate: updated.debarredToDate,
+        });
+      }
+    }
+
+    reqObj
       .input("FromDate", sql.Date, fromDate)
-      .input("ToDate", sql.Date, toDate)
-      .query(`
+      .input("ToDate", sql.Date, toDate);
+
+    if (userId) {
+      reqObj.input("UserId", sql.Int, Number(userId));
+      await reqObj.query(`
         UPDATE dbo.UserDetails
         SET DebarredFromDate = @FromDate, DebarredToDate = @ToDate
         WHERE UserId = @UserId
       `);
+    } else {
+      reqObj.input("EmpId", sql.NVarChar(50), String(targetEmpId).trim());
+      await reqObj.query(`
+        UPDATE dbo.UserDetails
+        SET DebarredFromDate = @FromDate, DebarredToDate = @ToDate
+        WHERE EmployeeId = @EmpId
+      `);
+    }
 
-    return res.json({ success: true, message: "User has been debarred successfully." });
+    return res.json({ success: true, message: "Employee has been debarred successfully." });
   } catch (err) {
     console.error("debar-user error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -2397,6 +2471,13 @@ async function buildCircularPDF(body) {
 // ── POST /api/admin/preview-circular — view PDF without sending email ─────────
 router.post("/preview-circular", async (req, res) => {
   try {
+    const { contactNumber } = req.body || {};
+    if (contactNumber) {
+      const cleanNum = String(contactNumber).trim();
+      if (!/^\d{1,10}$/.test(cleanNum) || cleanNum.length > 10) {
+        return res.status(400).json({ error: "Contact Number must contain only numbers and cannot exceed 10 digits." });
+      }
+    }
     const pdfBuffer = await buildCircularPDF(req.body);
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", "inline; filename=circular_preview.pdf");
@@ -2410,6 +2491,12 @@ router.post("/preview-circular", async (req, res) => {
 // ── POST /api/admin/generate-circular — build PDF & email ─────────────────────
 router.post("/generate-circular", async (req, res) => {
   try {
+    const { contactNumber } = req.body || {};
+    const cleanNum = String(contactNumber || "").trim();
+    if (!cleanNum || !/^\d{10}$/.test(cleanNum)) {
+      return res.status(400).json({ error: "Contact Number must be a valid 10-digit number (numbers only)." });
+    }
+
     const pdfBuffer = await buildCircularPDF(req.body);
 
     // ── Send email ────────────────────────────────────────────────────────────
@@ -2483,6 +2570,28 @@ async function ensureUserDetailsUserIdConstraint(pool) {
         ON dbo.UserDetails (UserId)
         WHERE UserId IS NOT NULL;
       END
+
+      -- 4. Create index on EmployeeId for fast lookups
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes 
+        WHERE object_id = OBJECT_ID('dbo.UserDetails') 
+          AND name = 'IX_UserDetails_EmployeeId'
+      )
+      BEGIN
+        CREATE NONCLUSTERED INDEX IX_UserDetails_EmployeeId
+        ON dbo.UserDetails (EmployeeId);
+      END
+
+      -- 5. Create composite index on (EmployeeId, DateOfBirth) for fast employee registration lookups
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes 
+        WHERE object_id = OBJECT_ID('dbo.UserDetails') 
+          AND name = 'IX_UserDetails_EmpId_Dob'
+      )
+      BEGIN
+        CREATE NONCLUSTERED INDEX IX_UserDetails_EmpId_Dob
+        ON dbo.UserDetails (EmployeeId, DateOfBirth);
+      END
     `);
   } catch (err) {
     console.error("ensureUserDetailsUserIdConstraint error:", err);
@@ -2519,11 +2628,20 @@ router.post("/register-employee-admin", requireAuth, async (req, res) => {
   if (!casteOfEmployee) return res.status(400).json({ error: "Caste of Employee is required." });
   if (!department) return res.status(400).json({ error: "Department is required." });
   if (!mobile || !mobile.trim()) return res.status(400).json({ error: "Mobile Number is required." });
+  const cleanMobile = mobile.trim().replace(/\D/g, "");
+  if (!/^\d{10}$/.test(cleanMobile)) {
+    return res.status(400).json({ error: "Mobile Number must be a valid 10-digit number (numbers only)." });
+  }
+
   if (!email || !email.trim()) return res.status(400).json({ error: "Email Address is required." });
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email.trim())) {
+    return res.status(400).json({ error: "Please provide a valid Email Address format (e.g. name@example.com)." });
+  }
 
   try {
     const pool = await getPool();
-    await ensureUserDetailsUserIdConstraint(pool);
 
     // 1. Check if employee already exists by EmployeeId in UserDetails
     const checkEmp = await pool

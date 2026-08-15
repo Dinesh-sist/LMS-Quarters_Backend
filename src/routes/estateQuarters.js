@@ -217,41 +217,63 @@ router.get("/areas", requireAuth, async (req, res) => {
 
 router.get("/employee-lookup/:employeeId", requireAuth, async (req, res) => {
   const { employeeId } = req.params;
+  const cleanEmpId = String(employeeId || "").trim();
+  if (!cleanEmpId) {
+    return res.json({ exists: false });
+  }
+
   try {
     const pool = await getPool();
     const result = await pool
       .request()
-      .input("employeeId", sql.NVarChar(64), employeeId)
+      .input("employeeId", sql.NVarChar(64), cleanEmpId)
       .query(`
-        SELECT EmployeeName, EmpClass, Category, Area_type, Quarter_no,
+        SELECT TOP 1 EmployeeName, EmpClass, Category, Area_type, Quarter_no,
                DateOfBirth, DateOfJoining, GradDate, Mobile, Email, Caste, DPT_NM
-        FROM dbo.UserDetails
-        WHERE EmployeeId = @employeeId
+        FROM dbo.UserDetails WITH (NOLOCK)
+        WHERE LTRIM(RTRIM(EmployeeId)) = @employeeId
       `);
       
-    if (result.recordset.length === 0) {
+    if (!result.recordset || result.recordset.length === 0) {
       return res.json({ exists: false });
     }
     
     const userDetailsData = result.recordset[0];
     
-    const estateResult = await pool
-      .request()
-      .input("employeeId", sql.NVarChar(64), employeeId)
-      .query(`
-        SELECT CAST(CATEGORY AS NVARCHAR(64)) AS CATEGORY, 
-               CAST(AREA_TYPE AS NVARCHAR(64)) AS AREA_TYPE, 
-               CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QUARTER_NUMBER
-        FROM dbo.[Estate_Quarters]
-        WHERE EMP_OTH = @employeeId
-      `);
+    let estateData = null;
+    try {
+      const estateResult = await pool
+        .request()
+        .input("employeeId", sql.NVarChar(64), cleanEmpId)
+        .query(`
+          SELECT TOP 1 CAST(CATEGORY AS NVARCHAR(64)) AS CATEGORY, 
+                 CAST(AREA_TYPE AS NVARCHAR(64)) AS AREA_TYPE, 
+                 CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QUARTER_NUMBER
+          FROM dbo.[Estate_Quarters] WITH (NOLOCK)
+          WHERE LTRIM(RTRIM(CAST(EMP_OTH AS NVARCHAR(64)))) = @employeeId
+        `);
+      if (estateResult.recordset && estateResult.recordset.length > 0) {
+        estateData = estateResult.recordset[0];
+      }
+    } catch (estateErr) {
+      console.warn("Estate_Quarters lookup non-fatal warning:", estateErr.message);
+    }
 
-    const estateData = estateResult.recordset.length > 0 ? estateResult.recordset[0] : null;
+    const formatDate = (val) => {
+      if (!val) return "";
+      if (val instanceof Date) {
+        if (Number.isNaN(val.getTime())) return "";
+        return `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, "0")}-${String(val.getDate()).padStart(2, "0")}`;
+      }
+      const str = String(val).trim();
+      const match = /^(\d{4}-\d{2}-\d{2})/.exec(str);
+      return match ? match[1] : str.slice(0, 10);
+    };
 
     return res.json({
       exists: true,
-      name: userDetailsData.EmployeeName,
-      empClass: userDetailsData.EmpClass,
+      name: userDetailsData.EmployeeName || "",
+      empClass: userDetailsData.EmpClass || "",
       userDetailsQuarter: {
         category: userDetailsData.Category,
         areaType: userDetailsData.Area_type,
@@ -262,12 +284,9 @@ router.get("/employee-lookup/:employeeId", requireAuth, async (req, res) => {
         areaType: estateData.AREA_TYPE,
         quarterNo: estateData.QUARTER_NUMBER
       } : null,
-      dateOfBirth: userDetailsData.DateOfBirth ? 
-        `${userDetailsData.DateOfBirth.getFullYear()}-${String(userDetailsData.DateOfBirth.getMonth() + 1).padStart(2, '0')}-${String(userDetailsData.DateOfBirth.getDate()).padStart(2, '0')}` : "",
-      dateOfJoining: userDetailsData.DateOfJoining ? 
-        `${userDetailsData.DateOfJoining.getFullYear()}-${String(userDetailsData.DateOfJoining.getMonth() + 1).padStart(2, '0')}-${String(userDetailsData.DateOfJoining.getDate()).padStart(2, '0')}` : "",
-      gradDate: userDetailsData.GradDate ? 
-        `${userDetailsData.GradDate.getFullYear()}-${String(userDetailsData.GradDate.getMonth() + 1).padStart(2, '0')}-${String(userDetailsData.GradDate.getDate()).padStart(2, '0')}` : "",
+      dateOfBirth: formatDate(userDetailsData.DateOfBirth),
+      dateOfJoining: formatDate(userDetailsData.DateOfJoining),
+      gradDate: formatDate(userDetailsData.GradDate),
       mobile: userDetailsData.Mobile || "",
       email: userDetailsData.Email || "",
       caste: userDetailsData.Caste || "",
@@ -275,7 +294,7 @@ router.get("/employee-lookup/:employeeId", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("Error looking up employee:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Internal server error: " + (err.message || "") });
   }
 });
 

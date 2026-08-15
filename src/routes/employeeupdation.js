@@ -27,14 +27,21 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
     const pool = await getPool();
     const result = await pool.request().query(`
       SELECT
+        [UserId]                   AS userId,
         [EmployeeId]               AS empId,
         [EmployeeName]             AS empName,
+        CONVERT(varchar(10), [DateOfBirth], 23)   AS dob,
+        CONVERT(varchar(10), [DateOfJoining], 23) AS doj,
+        CONVERT(varchar(10), [DateOfBirth], 23)   AS dateOfBirth,
+        CONVERT(varchar(10), [DateOfJoining], 23) AS dateOfJoining,
         [DPT_NM]                   AS department,
         LTRIM(RTRIM([EmpClass]))  AS currentClass,
         [Category]                 AS category,
         [Area_type]                AS areaType,
-        [Quarter_no]               AS quarterNo
-      FROM [LMSQuartersNew].[dbo].[UserDetails]
+        [Quarter_no]               AS quarterNo,
+        CONVERT(varchar(10), [DebarredFromDate], 23) AS debarredFromDate,
+        CONVERT(varchar(10), [DebarredToDate], 23)   AS debarredToDate
+      FROM [dbo].[UserDetails]
     `);
 
     const rows = result.recordset.map((row) => ({
@@ -45,7 +52,7 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error("GET /employeeupdation/employee/classes failed:", err);
-    res.status(500).json({ message: err.message, code: err.code }); // TEMP — revert after debugging
+    res.status(500).json({ message: err.message, code: err.code });
   }
 });
 
