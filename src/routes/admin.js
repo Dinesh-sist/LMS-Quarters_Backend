@@ -525,7 +525,7 @@ async function computeDynamicAllotments() {
   return { results, newCounters: rosterCounters };
 }
 
-router.get("/dynamic-allotments", requireAuth, requireRole(["admin", "superadmin"]), async (req, res) => {
+router.get("/dynamic-allotments", requireRole("admin", "superadmin"), async (req, res) => {
   try {
     const data = await computeDynamicAllotments();
     return res.json(data.results);
@@ -535,7 +535,7 @@ router.get("/dynamic-allotments", requireAuth, requireRole(["admin", "superadmin
   }
 });
 
-router.post("/finalize-allotments", requireAuth, requireRole(["admin", "superadmin"]), async (req, res) => {
+router.post("/finalize-allotments", requireRole("admin", "superadmin"), async (req, res) => {
   try {
     const data = await computeDynamicAllotments();
     const pool = await getPool();

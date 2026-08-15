@@ -16,9 +16,11 @@ function requireAuth(req, res, next) {
 }
 
 function requireRole(...roles) {
-  const allow = new Set(roles);
+  const flattened = roles.flat(Infinity).map((r) => String(r).toLowerCase());
+  const allow = new Set(flattened);
   return (req, res, next) => {
-    if (!req.user?.role || !allow.has(req.user.role)) {
+    const userRole = String(req.user?.role || "").toLowerCase();
+    if (!userRole || !allow.has(userRole)) {
       return res.status(403).json({ error: "Forbidden" });
     }
     return next();
