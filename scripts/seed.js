@@ -35,7 +35,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.Quarters WHERE QuarterNo='Q-201')
 `
   );
 
-  console.log("Seed complete.");
+  // console.log("Seed complete.");
   process.exit(0);
 }
 

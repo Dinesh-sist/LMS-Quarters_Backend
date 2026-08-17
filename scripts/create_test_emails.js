@@ -24,7 +24,7 @@ async function run() {
         VALUES (@EmailAddress)
       `);
       
-    console.log("Successfully created TestEmails table and inserted thirudhinesh1@gmail.com");
+    // console.log("Successfully created TestEmails table and inserted thirudhinesh1@gmail.com");
     process.exit(0);
   } catch (err) {
     console.error("Error setting up TestEmails:", err);

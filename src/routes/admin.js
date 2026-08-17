@@ -1283,53 +1283,28 @@ router.post("/debar-user", async (req, res) => {
     const reqObj = pool.request();
 
     if (isCancelling) {
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, "0")}-${String(yesterday.getDate()).padStart(2, "0")}`;
-
-      reqObj.input("YesterdayDate", sql.Date, yesterdayStr);
-
       if (userId) {
         reqObj.input("UserId", sql.Int, Number(userId));
-        const result = await reqObj.query(`
+        await reqObj.query(`
           UPDATE dbo.UserDetails
-          SET DebarredToDate = @YesterdayDate
-          WHERE UserId = @UserId;
-
-          SELECT 
-            CONVERT(varchar(10), DebarredFromDate, 23) AS debarredFromDate,
-            CONVERT(varchar(10), DebarredToDate, 23)   AS debarredToDate
-          FROM dbo.UserDetails
+          SET DebarredFromDate = NULL, DebarredToDate = NULL
           WHERE UserId = @UserId;
         `);
-        const updated = result.recordset?.[0] || {};
-        return res.json({ 
-          success: true, 
-          message: "Debarment has been cancelled successfully.",
-          debarredFromDate: updated.debarredFromDate,
-          debarredToDate: updated.debarredToDate,
-        });
       } else {
         reqObj.input("EmpId", sql.NVarChar(50), String(targetEmpId).trim());
-        const result = await reqObj.query(`
+        await reqObj.query(`
           UPDATE dbo.UserDetails
-          SET DebarredToDate = @YesterdayDate
-          WHERE EmployeeId = @EmpId;
-
-          SELECT 
-            CONVERT(varchar(10), DebarredFromDate, 23) AS debarredFromDate,
-            CONVERT(varchar(10), DebarredToDate, 23)   AS debarredToDate
-          FROM dbo.UserDetails
+          SET DebarredFromDate = NULL, DebarredToDate = NULL
           WHERE EmployeeId = @EmpId;
         `);
-        const updated = result.recordset?.[0] || {};
-        return res.json({ 
-          success: true, 
-          message: "Debarment has been cancelled successfully.",
-          debarredFromDate: updated.debarredFromDate,
-          debarredToDate: updated.debarredToDate,
-        });
       }
+
+      return res.json({ 
+        success: true, 
+        message: "Debarment has been cancelled successfully.",
+        debarredFromDate: null,
+        debarredToDate: null,
+      });
     }
 
     reqObj
@@ -1341,18 +1316,23 @@ router.post("/debar-user", async (req, res) => {
       await reqObj.query(`
         UPDATE dbo.UserDetails
         SET DebarredFromDate = @FromDate, DebarredToDate = @ToDate
-        WHERE UserId = @UserId
+        WHERE UserId = @UserId;
       `);
     } else {
       reqObj.input("EmpId", sql.NVarChar(50), String(targetEmpId).trim());
       await reqObj.query(`
         UPDATE dbo.UserDetails
         SET DebarredFromDate = @FromDate, DebarredToDate = @ToDate
-        WHERE EmployeeId = @EmpId
+        WHERE EmployeeId = @EmpId;
       `);
     }
 
-    return res.json({ success: true, message: "Employee has been debarred successfully." });
+    return res.json({ 
+      success: true, 
+      message: "Employee has been debarred successfully.",
+      debarredFromDate: fromDate,
+      debarredToDate: toDate,
+    });
   } catch (err) {
     console.error("debar-user error:", err);
     return res.status(500).json({ error: "Internal server error" });
@@ -1967,10 +1947,25 @@ router.get("/quarter-numbers", async (req, res) => {
 
 
 
+function getAssetPath(filename) {
+  const candidates = [
+    path.join(__dirname, "..", "..", "..", "..", "Quarters-Frontend", "src", "assets", filename),
+    path.join(__dirname, "..", "..", "..", "Quarters-Frontend", "src", "assets", filename),
+    path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", filename),
+    path.join(__dirname, "..", "..", "..", "LMS-Quarters_Frontend", "src", "assets", filename),
+    path.join(process.cwd(), "..", "Quarters-Frontend", "src", "assets", filename),
+    path.join(process.cwd(), "..", "..", "Quarters-Frontend", "src", "assets", filename),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return candidates[0];
+}
+
 // ── Allotment Order PDF ────────────────────────────────────────────
 async function buildAllotmentOrderPDF(application) {
-  const LOGO_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "Logo.png");
-  const SIG_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "signature.png");
+  const LOGO_PATH = getAssetPath("Logo.png");
+  const SIG_PATH = getAssetPath("signature.png");
   const logoExists = fs.existsSync(LOGO_PATH);
   const sigExists = fs.existsSync(SIG_PATH);
 
@@ -2205,13 +2200,13 @@ async function buildCircularPDF(body) {
     doc.on("error", reject);
   });
 
-  const LOGO_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "Logo.png");
+  const LOGO_PATH = getAssetPath("Logo.png");
   const logoExists = fs.existsSync(LOGO_PATH);
 
-  const SAGARMALA_LOGO_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "sagaramala.png");
+  const SAGARMALA_LOGO_PATH = getAssetPath("sagaramala.png");
   const sagarmalaExists = fs.existsSync(SAGARMALA_LOGO_PATH);
 
-  const SIG_PATH = path.join(__dirname, "..", "..", "..", "LMS-Quaters_Frontend", "src", "assets", "signature.png");
+  const SIG_PATH = getAssetPath("signature.png");
   const sigExists = fs.existsSync(SIG_PATH);
 
   // ── Header ──────────────────────────────────────────────────────────────
@@ -2367,6 +2362,30 @@ async function buildCircularPDF(body) {
     doc.moveDown(0.2);
   });
 
+  doc.moveDown(1.5);
+  if (doc.y > doc.page.height - 120) {
+    doc.addPage();
+  }
+  const copySigY = doc.y;
+  if (sigExists) {
+    try {
+      doc.image(SIG_PATH, circularSignatureImageX, copySigY, {
+        cover: [circularSignatureImageWidth, circularSignatureImageHeight],
+        align: "center",
+        valign: "center",
+      });
+      doc.y = copySigY + circularSignatureImageHeight + 2;
+    } catch (signatureErr) {
+      doc.y = copySigY + 38;
+    }
+  } else {
+    doc.y = copySigY + 38;
+  }
+
+  doc.font("Helvetica-Bold").fontSize(12)
+    .text("Sr. Asst. Estate Manager,", circularSignatureTextX, doc.y, { width: circularSignatureTextWidth, align: "center" })
+    .text("Paradip Port Authority", circularSignatureTextX, doc.y, { width: circularSignatureTextWidth, align: "center" });
+
   
   // ── Page 2: Table of Assignments ─────────────────────────────────────────
   if (assignments && assignments.length > 0) {
@@ -2453,12 +2472,6 @@ async function buildCircularPDF(body) {
     doc.text("Total", colSl, yPosition + 8, { width: colRemarks - colSl, align: "center" });
     doc.text(`${totalNos.toString().padStart(2, '0')} nos.`, colRemarks + 5, yPosition + 8, { width: colEnd - colRemarks - 10, align: "center" });
 
-    doc.moveDown(5);
-    
-    // Signature block on the left side
-    const sigBlockX = 60;
-    doc.text("Zone-in-charge, Madhuban", sigBlockX, doc.y + 40, { align: "left" });
-    doc.text("Estate Wing, PPA", sigBlockX, doc.y, { align: "left" });
   }
 
   doc.end();

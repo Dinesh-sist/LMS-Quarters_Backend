@@ -29,7 +29,7 @@ function createApp() {
     res.on("finish", () => {
       if (req.method !== "OPTIONS") {
         const duration = Date.now() - start;
-        console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ${res.statusCode} - ${duration}ms`);
+        // console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} ${res.statusCode} - ${duration}ms`);
       }
     });
     next();

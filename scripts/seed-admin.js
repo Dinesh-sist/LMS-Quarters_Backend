@@ -18,10 +18,10 @@ ELSE
   INSERT INTO dbo.Users (Username, PasswordHash, Role) VALUES (@Username, @PasswordHash, @Role);
 `);
 
-  console.log("✅ Admin user upserted successfully.");
-  console.log("   Username : admin");
-  console.log("   Password : admin123");
-  console.log("   Role     : admin");
+  // console.log("✅ Admin user upserted successfully.");
+  // console.log("   Username : admin");
+  // console.log("   Password : admin123");
+  // console.log("   Role     : admin");
   process.exit(0);
 }
 

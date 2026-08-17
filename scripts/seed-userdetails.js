@@ -55,7 +55,7 @@ ELSE
     (@UserId, @EmployeeId, @DateOfBirth, @EmployeeName, @DateOfJoining, @EmpClass, @Category, @Mobile, @Email);
 `);
 
-  console.log(`✅ Inserted/Updated: ${name} (${employeeId}) | Mobile: ${mobile} | Email: ${email}`);
+  // console.log(`✅ Inserted/Updated: ${name} (${employeeId}) | Mobile: ${mobile} | Email: ${email}`);
 }
 
 async function main() {
@@ -85,7 +85,7 @@ async function main() {
     username:    "EMP002"    // using Employee ID as username since no email
   });
 
-  console.log("\n✅ All records inserted successfully.");
+  // console.log("\n✅ All records inserted successfully.");
   process.exit(0);
 }
 
