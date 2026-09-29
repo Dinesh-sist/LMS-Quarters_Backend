@@ -175,7 +175,10 @@ async function rebuildQuarterApplicationPriorityNumbers(db) {
       ud.[DateOfJoining],
       ud.[DateOfBirth]
     FROM dbo.Quarter_Applications qa
-    LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+    LEFT JOIN dbo.UserDetails ud ON (
+      (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
+      OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
+    )
     ORDER BY qa.[Id] ASC
   `);
 
@@ -339,7 +342,10 @@ async function computeDynamicAllotments() {
            ud.GradDate, ud.Basic, ud.DateOfJoining, ud.DateOfBirth,
            ud.area_type AS CurrentAreaType, ud.Quarter_no AS CurrentQuarterNo, ud.Category AS CurrentQuarterType
     FROM dbo.Quarter_Applications a
-    LEFT JOIN dbo.UserDetails ud ON a.UserId = ud.UserId
+    LEFT JOIN dbo.UserDetails ud ON (
+      (a.UserId IS NOT NULL AND a.UserId = ud.UserId)
+      OR (a.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(a.EmpId)))
+    )
     WHERE a.Status = 'Pending'
       AND CONVERT(date, a.PublishedDateFrom) = CONVERT(date, @fromDate)
       AND CONVERT(date, a.PublishedDateTo) = CONVERT(date, @toDate)
@@ -603,7 +609,10 @@ router.get("/verify-quarter-applications", async (req, res) => {
         CONVERT(varchar(19), qa.[CreatedAt], 120)  AS CreatedAt,
         CONVERT(varchar(19), qa.[UpdatedAt], 120)  AS UpdatedAt
       FROM dbo.Quarter_Applications qa
-      LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+      LEFT JOIN dbo.UserDetails ud ON (
+        (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
+        OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
+      )
       ORDER BY qa.[Id] DESC
     `);
     const getClassRank = (cls) => {
@@ -703,8 +712,11 @@ router.get("/check-approval", async (req, res) => {
           qa.[CreatedAt],
           qa.[UpdatedAt]
         FROM dbo.Quarter_Applications qa
-        LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
-        WHERE qa.[UserId] = @UserId
+        LEFT JOIN dbo.UserDetails ud ON (
+          (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
+          OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
+        )
+        WHERE qa.[UserId] = @UserId OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
         ORDER BY qa.[Id] DESC
       `);
 
@@ -1001,7 +1013,10 @@ router.get("/status-of-applications", async (req, res) => {
         ud.[Quarter_no]                            AS CurrentQuarterNo,
         ud.[Category]                              AS CurrentQuarterType
       FROM dbo.Quarter_Applications qa
-      LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+      LEFT JOIN dbo.UserDetails ud ON (
+        (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
+        OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
+      )
       WHERE qa.[Status] = 'approved' OR qa.[Status] = 'Allotted'
       ORDER BY qa.[Id] DESC
     `);
@@ -1159,7 +1174,10 @@ router.post("/generate-approval-mails", requireAuth, async (req, res) => {
                 ud.Category as CurrentQuarterType,
                 ud.Email as UserEmail
               FROM dbo.Quarter_Applications qa
-              LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+              LEFT JOIN dbo.UserDetails ud ON (
+                (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
+                OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
+              )
               WHERE qa.Id = @id
             `);
           
@@ -1831,7 +1849,10 @@ router.patch("/applications/:id", async (req, res) => {
         qa.[Status],
         ud.[Email] AS UserEmail
       FROM dbo.Quarter_Applications qa
-      LEFT JOIN dbo.UserDetails ud ON ud.UserId = qa.UserId
+      LEFT JOIN dbo.UserDetails ud ON (
+        (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
+        OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
+      )
       WHERE qa.[Id] = @Id
     `);
 

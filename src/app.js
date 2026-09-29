@@ -41,6 +41,7 @@ function createApp() {
       origin(origin, cb) {
         if (!origin) return cb(null, true);
         if (allowedOrigins.includes(origin)) return cb(null, true);
+        if (/^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) return cb(null, true);
         return cb(new Error("CORS blocked"));
       },
       credentials: true
