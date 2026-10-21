@@ -1,5 +1,5 @@
 const express = require("express");
-const { getPool } = require("../db");
+const { getPool, sql } = require("../db");
 const { requireAuth } = require("../middleware/auth");
 
 const router = express.Router();
@@ -28,14 +28,16 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
     const result = await pool.request().query(`
       SELECT
         [UserId]                   AS userId,
-        [EmployeeId]               AS empId,
-        [EmployeeName]             AS empName,
+        LTRIM(RTRIM([EmployeeId])) AS empId,
+        LTRIM(RTRIM([EmployeeName])) AS empName,
         CONVERT(varchar(10), [DateOfBirth], 23)   AS dob,
         CONVERT(varchar(10), [DateOfJoining], 23) AS doj,
         CONVERT(varchar(10), [DateOfBirth], 23)   AS dateOfBirth,
         CONVERT(varchar(10), [DateOfJoining], 23) AS dateOfJoining,
-        [DPT_NM]                   AS department,
-        LTRIM(RTRIM([EmpClass]))  AS currentClass,
+        CONVERT(varchar(10), [GradDate], 23)      AS gradDate,
+        [Basic]                    AS basic,
+        LTRIM(RTRIM([DPT_NM]))     AS department,
+        LTRIM(RTRIM([EmpClass]))   AS currentClass,
         [Category]                 AS category,
         [Area_type]                AS areaType,
         [Quarter_no]               AS quarterNo,
@@ -46,7 +48,10 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
 
     const rows = result.recordset.map((row) => ({
       ...row,
-      currentClass: DB_TO_LABEL[row.currentClass] || row.currentClass,
+      empId: row.empId?.trim() || row.empId,
+      empName: row.empName?.trim() || row.empName,
+      department: row.department?.trim() || row.department,
+      currentClass: DB_TO_LABEL[row.currentClass?.trim()] || row.currentClass?.trim(),
     }));
 
     res.json(rows);
@@ -60,9 +65,10 @@ router.get("/employee/classes", requireAuth, async (req, res) => {
 // POST /employee-classes/update
 // ---------------------------------------------------------------------------
 router.post("/employee-classes/update", requireAuth, async (req, res) => {
-  const { empId, newClass } = req.body || {};
+  const { empId, newClass, department, basic, gradDate } = req.body || {};
 
-  if (!empId || !newClass) {
+  const cleanEmpId = (empId || "").trim();
+  if (!cleanEmpId || !newClass) {
     return res.status(400).json({ message: "empId and newClass are required." });
   }
 
@@ -72,39 +78,68 @@ router.post("/employee-classes/update", requireAuth, async (req, res) => {
     });
   }
 
+  if (!gradDate || !String(gradDate).trim()) {
+    return res.status(400).json({ message: "Grade Date is required." });
+  }
+
+  const parsedGradDate = new Date(gradDate);
+  if (isNaN(parsedGradDate.getTime())) {
+    return res.status(400).json({ message: "Invalid Grade Date format." });
+  }
+
   const dbClassValue = LABEL_TO_DB[newClass];
+
+  let parsedBasic = null;
+  if (basic !== undefined && basic !== null && basic !== "") {
+    parsedBasic = Number(basic);
+    if (isNaN(parsedBasic) || parsedBasic < 0) {
+      return res.status(400).json({ message: "Basic must be a valid positive number." });
+    }
+  }
+
+  const cleanDept = department !== undefined && department !== null ? String(department).trim() : null;
 
   try {
     const pool = await getPool();
 
-    const result = await pool
-      .request()
-      .input("empId", empId)
-      .input("dbClassValue", dbClassValue)
-      .query(`
-        UPDATE [LMSQuartersNew].[dbo].[UserDetails]
-        SET [EmpClass] = @dbClassValue
-        WHERE [EmployeeId] = @empId;
+    const request = pool.request();
+    request.input("empId", sql.NVarChar(50), cleanEmpId);
+    request.input("dbClassValue", sql.NVarChar(60), dbClassValue);
+    request.input("gradDate", sql.Date, parsedGradDate);
+    request.input("department", sql.NVarChar(200), cleanDept);
+    request.input("basic", sql.Float, parsedBasic);
 
-        SELECT
-          [EmployeeId]               AS empId,
-          [EmployeeName]             AS empName,
-          [DPT_NM]                   AS department,
-          LTRIM(RTRIM([EmpClass]))  AS currentClass
-        FROM [LMSQuartersNew].[dbo].[UserDetails]
-        WHERE [EmployeeId] = @empId;
-      `);
+    const result = await request.query(`
+      UPDATE [dbo].[UserDetails]
+      SET [EmpClass] = @dbClassValue,
+          [GradDate] = @gradDate,
+          [DPT_NM]   = CASE WHEN @department IS NOT NULL THEN @department ELSE [DPT_NM] END,
+          [Basic]    = CASE WHEN @basic IS NOT NULL THEN @basic ELSE [Basic] END
+      WHERE LTRIM(RTRIM([EmployeeId])) = @empId;
+
+      SELECT
+        LTRIM(RTRIM([EmployeeId]))                 AS empId,
+        LTRIM(RTRIM([EmployeeName]))               AS empName,
+        LTRIM(RTRIM([DPT_NM]))                     AS department,
+        [Basic]                                    AS basic,
+        CONVERT(varchar(10), [GradDate], 23)       AS gradDate,
+        LTRIM(RTRIM([EmpClass]))                   AS currentClass
+      FROM [dbo].[UserDetails]
+      WHERE LTRIM(RTRIM([EmployeeId])) = @empId;
+    `);
 
     const updatedRow = result.recordset?.[0];
 
-
     if (!updatedRow) {
-      return res.status(404).json({ message: `No employee found with id ${empId}.` });
+      return res.status(404).json({ message: `No employee found with id ${cleanEmpId}.` });
     }
 
     res.json({
       ...updatedRow,
-      currentClass: DB_TO_LABEL[updatedRow.currentClass] || updatedRow.currentClass,
+      empId: updatedRow.empId?.trim() || updatedRow.empId,
+      empName: updatedRow.empName?.trim() || updatedRow.empName,
+      department: updatedRow.department?.trim() || updatedRow.department,
+      currentClass: DB_TO_LABEL[updatedRow.currentClass?.trim()] || updatedRow.currentClass?.trim(),
     });
   } catch (err) {
     console.error("POST /employeeupdation/employee-classes/update failed:", err);

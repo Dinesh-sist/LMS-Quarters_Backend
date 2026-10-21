@@ -207,17 +207,20 @@ async function rebuildQuarterApplicationPriorityNumbers(db) {
     return Number(a.Id) - Number(b.Id);
   });
 
-  for (let i = 0; i < ranked.length; i += 1) {
-    // Keep the update focused on the ranking column so timestamps remain meaningful.
-    // eslint-disable-next-line no-await-in-loop
-    await db.request()
-      .input("Id", sql.Int, ranked[i].Id)
-      .input("PriorityNo", sql.Int, i + 1)
-      .query(`
-        UPDATE dbo.Quarter_Applications
-        SET PriorityNo = @PriorityNo
-        WHERE Id = @Id
+  if (ranked.length > 0) {
+    // Batch update in chunks of 500 to stay well within SQL Server's 1000 row VALUES limit
+    const chunkSize = 500;
+    for (let i = 0; i < ranked.length; i += chunkSize) {
+      const chunk = ranked.slice(i, i + chunkSize);
+      const valuesSql = chunk.map((r, idx) => `(${Number(r.Id)}, ${i + idx + 1})`).join(",");
+      // eslint-disable-next-line no-await-in-loop
+      await db.request().query(`
+        UPDATE qa
+        SET PriorityNo = v.PriorityNo
+        FROM dbo.Quarter_Applications qa
+        JOIN (VALUES ${valuesSql}) AS v(Id, PriorityNo) ON qa.Id = v.Id
       `);
+    }
   }
 
   return ranked.length;
@@ -346,7 +349,7 @@ async function computeDynamicAllotments() {
       (a.UserId IS NOT NULL AND a.UserId = ud.UserId)
       OR (a.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(a.EmpId)))
     )
-    WHERE a.Status = 'Pending'
+    WHERE LOWER(a.Status) = 'pending'
       AND CONVERT(date, a.PublishedDateFrom) = CONVERT(date, @fromDate)
       AND CONVERT(date, a.PublishedDateTo) = CONVERT(date, @toDate)
   `);
@@ -490,14 +493,21 @@ async function computeDynamicAllotments() {
         const qKey = `${q.QtrType}|${q.QtrLocation}|${q.QtrRequested}`;
         winners[qKey] = winnerCopy;
         
-        if (!userWins[winnerCopy.UserId]) {
-          userWins[winnerCopy.UserId] = [];
+        const effectiveEmpId = String(winnerCopy.EmpId || "").trim();
+        const userKey = effectiveEmpId
+          ? `EMP_${effectiveEmpId.toUpperCase()}`
+          : (winnerCopy.UserId != null && String(winnerCopy.UserId).trim())
+            ? `UID_${String(winnerCopy.UserId).trim()}`
+            : `APP_${winnerCopy.Id}`;
+
+        if (!userWins[userKey]) {
+          userWins[userKey] = [];
         }
-        userWins[winnerCopy.UserId].push({ qKey, app: winnerCopy });
+        userWins[userKey].push({ qKey, app: winnerCopy });
       }
     }
     
-    for (const [userId, wins] of Object.entries(userWins)) {
+    for (const [userKey, wins] of Object.entries(userWins)) {
       if (wins.length > 1) {
         wins.sort((a, b) => {
           const prioA = a.app.PriorityNo != null ? Number(a.app.PriorityNo) : Infinity;
@@ -687,6 +697,11 @@ router.get("/check-approval", async (req, res) => {
       .request()
       .input("UserId", sql.Int, userId)
       .query(`
+        DECLARE @LoggedInEmpId NVARCHAR(100);
+        SELECT TOP 1 @LoggedInEmpId = LTRIM(RTRIM(EmployeeId))
+        FROM dbo.UserDetails
+        WHERE UserId = @UserId;
+
         SELECT
           qa.[Id],
           qa.[AppNo],
@@ -716,7 +731,8 @@ router.get("/check-approval", async (req, res) => {
           (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
           OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
         )
-        WHERE qa.[UserId] = @UserId OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
+        WHERE qa.[UserId] = @UserId
+           OR (@LoggedInEmpId IS NOT NULL AND LTRIM(RTRIM(qa.[EmpId])) = @LoggedInEmpId)
         ORDER BY qa.[Id] DESC
       `);
 
@@ -769,6 +785,7 @@ router.post("/checkapprovalsave", async (req, res) => {
     const userId = Number(req.user.sub);
     const {
       quarterId,
+      quarters: quartersList,
       reason = null,
       exchangeReason = null,
       quarterNo = null,
@@ -777,8 +794,12 @@ router.post("/checkapprovalsave", async (req, res) => {
       department = null,
     } = req.body;
 
-    if (!quarterId) {
-      return res.status(400).json({ error: "quarterId is required" });
+    const targetQuarters = Array.isArray(quartersList) && quartersList.length > 0
+      ? quartersList
+      : quarterId ? [{ quarterId, quarterNo, quarterType, location }] : [];
+
+    if (targetQuarters.length === 0) {
+      return res.status(400).json({ error: "At least one quarter must be selected" });
     }
 
     const pool = await getPool();
@@ -850,98 +871,137 @@ router.post("/checkapprovalsave", async (req, res) => {
     let casteValue = emp.Caste || "GENERAL";
     // ────────────────────────────────────────────────────────────────────────
 
-    let qtr = {};
-    if (quarterNo && quarterType && location) {
-      qtr = {
-        QuarterNo: String(quarterNo),
-        QuarterType: String(quarterType),
-        Location: String(location)
-      };
-    } else {
-      const qtrResult = await pool
-        .request()
-        .input("QuarterId", sql.Int, parseInt(quarterId))
-        .query(`
-          SELECT
-            CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QuarterNo,
-            CAST(CATEGORY         AS NVARCHAR(64)) AS QuarterType,
-            CAST(AREA_TYPE        AS NVARCHAR(64)) AS Location
-          FROM dbo.[Estate_Quarters]
-          WHERE OBJECTID = @QuarterId
-        `);
-      qtr = qtrResult.recordset[0] || {};
-    }
-
-
-    const appNo = "APP-" + Date.now();
-
     const tx = new sql.Transaction(pool);
     await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
 
     try {
-      let rosterNo = null;
+      const insertedRecords = [];
 
-      if (reason !== "exchange") {
-        const rosterRequest = new sql.Request(tx);
-        const rosterLookup = await rosterRequest
+      for (let i = 0; i < targetQuarters.length; i++) {
+        const item = targetQuarters[i];
+        let qtr = {};
+        if (item.quarterNo && item.quarterType && item.location) {
+          qtr = {
+            QuarterNo: String(item.quarterNo),
+            QuarterType: String(item.quarterType),
+            Location: String(item.location)
+          };
+        } else {
+          const qtrLookup = new sql.Request(tx);
+          const qtrResult = await qtrLookup
+            .input("QuarterId", sql.Int, parseInt(item.quarterId))
+            .query(`
+              SELECT
+                CAST([QUARTER NUMBER] AS NVARCHAR(64)) AS QuarterNo,
+                CAST(CATEGORY         AS NVARCHAR(64)) AS QuarterType,
+                CAST(AREA_TYPE        AS NVARCHAR(64)) AS Location
+              FROM dbo.[Estate_Quarters]
+              WHERE OBJECTID = @QuarterId
+            `);
+          qtr = qtrResult.recordset[0] || {};
+        }
+
+        // Prevent duplicate applications: Check if employee has already applied for this quarter IN THE CURRENT PUBLICATION
+        const duplicateCheck = new sql.Request(tx);
+        const existingApp = await duplicateCheck
+          .input("UserId", sql.Int, userId)
+          .input("EmpId", sql.NVarChar(100), emp.EmpId || "")
           .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
+          .input("QtrLocation", sql.NVarChar(64), qtr.Location || null)
+          .input("QtrType", sql.NVarChar(64), qtr.QuarterType || null)
+          .input("PublishedDateFrom", sql.Date, publication.From_Date)
+          .input("PublishedDateTo", sql.Date, publication.To_Date)
           .query(`
-            DECLARE @RosterNo INT;
-
-            SELECT @RosterNo = (COUNT(*) % 60) + 1
+            SELECT TOP 1 Id, AppNo, Status
             FROM dbo.Quarter_Applications
-            WHERE QtrRequested = @QtrRequested AND ISNULL(Reason, '') != 'exchange';
-
-            SELECT @RosterNo AS RosterNo;
+            WHERE ((@UserId IS NOT NULL AND UserId = @UserId) OR (@EmpId <> '' AND EmpId = @EmpId))
+              AND CAST(QtrRequested AS NVARCHAR(64)) = CAST(@QtrRequested AS NVARCHAR(64))
+              AND CAST(QtrLocation AS NVARCHAR(64)) = CAST(@QtrLocation AS NVARCHAR(64))
+              AND CAST(QtrType AS NVARCHAR(64)) = CAST(@QtrType AS NVARCHAR(64))
+              AND CAST(PublishedDateFrom AS DATE) = CAST(@PublishedDateFrom AS DATE)
+              AND CAST(PublishedDateTo AS DATE) = CAST(@PublishedDateTo AS DATE)
+              AND LOWER(LTRIM(RTRIM(CAST(Status AS NVARCHAR(24))))) NOT IN ('rejected', 'cancelled', 'vacated')
           `);
 
-        rosterNo = Number(rosterLookup.recordset[0]?.RosterNo || 1);
+        if (existingApp.recordset.length > 0) {
+          await tx.rollback();
+          return res.status(400).json({
+            error: `You have already applied for Quarter ${qtr.QuarterNo} (${qtr.Location || qtr.QuarterType}). Duplicate applications are not allowed.`
+          });
+        }
+
+        const appNo = `APP-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+        let rosterNo = null;
+        if (reason !== "exchange") {
+          const rosterRequest = new sql.Request(tx);
+          const rosterLookup = await rosterRequest
+            .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
+            .query(`
+              DECLARE @RosterNo INT;
+
+              SELECT @RosterNo = (COUNT(*) % 60) + 1
+              FROM dbo.Quarter_Applications
+              WHERE QtrRequested = @QtrRequested AND ISNULL(Reason, '') != 'exchange';
+
+              SELECT @RosterNo AS RosterNo;
+            `);
+
+          rosterNo = Number(rosterLookup.recordset[0]?.RosterNo || 1);
+        }
+
+        const insertRequest = new sql.Request(tx);
+        const result = await insertRequest
+          .input("AppNo", sql.NVarChar(50), appNo)
+          .input("UserId", sql.Int, userId)
+          .input("EmpId", sql.NVarChar(100), emp.EmpId)
+          .input("EmpName", sql.NVarChar(200), emp.EmpName)
+          .input("Class", sql.NVarChar(100), emp.Class)
+          .input("Caste", sql.NVarChar(100), casteValue)
+          .input("AllotCatId", sql.Int, null)
+          .input("EmailId", sql.NVarChar(200), emp.EmailId)
+          .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
+          .input("QtrLocation", sql.NVarChar(64), qtr.Location || null)
+          .input("QtrType", sql.NVarChar(64), qtr.QuarterType || null)
+          .input("PublishedDateFrom", sql.Date, publication.From_Date)
+          .input("PublishedDateTo", sql.Date, publication.To_Date)
+          .input("RosterNo", sql.Int, rosterNo)
+          .input("Reason", sql.NVarChar(100), reason)
+          .input("ExchangeReason", sql.NVarChar(400), exchangeReason)
+          .input("Department", sql.NVarChar(200), department)
+          .query(`
+            INSERT INTO dbo.Quarter_Applications (
+              AppNo, UserId, EmpId, EmpName, Class, Caste,
+              AllotCatId, EmailId, ReqDate, QtrRequested,
+              QtrLocation, QtrType, PublishedDateFrom, PublishedDateTo,
+              RosterNo, Reason, ExchangeReason, Department, Status, CreatedAt, UpdatedAt
+            )
+            OUTPUT INSERTED.Id, INSERTED.AppNo, INSERTED.RosterNo
+            VALUES (
+              @AppNo, @UserId, @EmpId, @EmpName, @Class, @Caste,
+              @AllotCatId, @EmailId, GETDATE(), @QtrRequested,
+              @QtrLocation, @QtrType, @PublishedDateFrom, @PublishedDateTo,
+              @RosterNo, @Reason, @ExchangeReason, @Department, 'pending', GETDATE(), GETDATE()
+            )
+          `);
+
+        if (result.recordset[0]) {
+          insertedRecords.push(result.recordset[0]);
+        }
       }
 
-      const insertRequest = new sql.Request(tx);
-      const result = await insertRequest
-        .input("AppNo", sql.NVarChar(50), appNo)
-        .input("UserId", sql.Int, userId)
-        .input("EmpId", sql.NVarChar(100), emp.EmpId)
-        .input("EmpName", sql.NVarChar(200), emp.EmpName)
-        .input("Class", sql.NVarChar(100), emp.Class)
-        .input("Caste", sql.NVarChar(100), casteValue)
-        .input("AllotCatId", sql.Int, null)
-        .input("EmailId", sql.NVarChar(200), emp.EmailId)
-        .input("QtrRequested", sql.NVarChar(64), qtr.QuarterNo || null)
-        .input("QtrLocation", sql.NVarChar(64), qtr.Location || null)
-        .input("QtrType", sql.NVarChar(64), qtr.QuarterType || null)
-        .input("PublishedDateFrom", sql.Date, publication.From_Date)
-        .input("PublishedDateTo", sql.Date, publication.To_Date)
-        .input("RosterNo", sql.Int, rosterNo)
-        .input("Reason", sql.NVarChar(100), reason)
-        .input("ExchangeReason", sql.NVarChar(400), exchangeReason)
-        .input("Department", sql.NVarChar(200), department)
-        .query(`
-          INSERT INTO dbo.Quarter_Applications (
-            AppNo, UserId, EmpId, EmpName, Class, Caste,
-            AllotCatId, EmailId, ReqDate, QtrRequested,
-            QtrLocation, QtrType, PublishedDateFrom, PublishedDateTo,
-            RosterNo, Reason, ExchangeReason, Department, Status, CreatedAt, UpdatedAt
-          )
-          OUTPUT INSERTED.Id, INSERTED.AppNo, INSERTED.RosterNo
-          VALUES (
-            @AppNo, @UserId, @EmpId, @EmpName, @Class, @Caste,
-            @AllotCatId, @EmailId, GETDATE(), @QtrRequested,
-            @QtrLocation, @QtrType, @PublishedDateFrom, @PublishedDateTo,
-            @RosterNo, @Reason, @ExchangeReason, @Department, 'pending', GETDATE(), GETDATE()
-          )
-        `);
-
       await rebuildQuarterApplicationPriorityNumbers(tx);
-
       await tx.commit();
 
-      const inserted = result.recordset[0];
+      const insertedIds = insertedRecords.map((r) => r.Id);
+      const insertedAppNos = insertedRecords.map((r) => r.AppNo);
+
       return res.status(201).json({
-        id: inserted?.Id,
-        appNo: inserted?.AppNo,
-        rosterNo: inserted?.RosterNo,
+        id: insertedIds[0],
+        ids: insertedIds,
+        appNo: insertedAppNos.join(", "),
+        appNos: insertedAppNos,
+        rosterNo: insertedRecords[0]?.RosterNo,
         publishedDateFrom: publication.From_Date,
         publishedDateTo: publication.To_Date,
       });
@@ -1017,7 +1077,7 @@ router.get("/status-of-applications", async (req, res) => {
         (qa.UserId IS NOT NULL AND ud.UserId = qa.UserId)
         OR (qa.EmpId IS NOT NULL AND LTRIM(RTRIM(ud.EmployeeId)) = LTRIM(RTRIM(qa.EmpId)))
       )
-      WHERE qa.[Status] = 'approved' OR qa.[Status] = 'Allotted'
+      WHERE LOWER(qa.[Status]) IN ('approved', 'allotted')
       ORDER BY qa.[Id] DESC
     `);
     
@@ -1211,14 +1271,16 @@ router.post("/generate-approval-mails", requireAuth, async (req, res) => {
 
             // --- Update UserDetails (Assign new Quarter) ---
             await pool.request()
-              .input("userId", sql.Int, current.UserId)
+              .input("userId", sql.Int, current.UserId || null)
+              .input("empId", sql.NVarChar, current.EmpId || null)
               .input("newQtr", sql.NVarChar, String(current.QtrRequested))
               .input("newArea", sql.NVarChar, current.QtrLocation)
               .input("newCat", sql.NVarChar, current.QtrType)
               .query(`
                 UPDATE dbo.UserDetails
                 SET Quarter_no = @newQtr, area_type = @newArea, Category = @newCat
-                WHERE UserId = @userId
+                WHERE (@userId IS NOT NULL AND UserId = @userId)
+                   OR (@empId IS NOT NULL AND LTRIM(RTRIM(EmployeeId)) = LTRIM(RTRIM(@empId)))
               `);
 
             // Build PDF
@@ -1721,28 +1783,35 @@ router.delete("/applications/:id", requireAuth, async (req, res) => {
           qa.[UserId],
           qa.[EmpId],
           qa.[Status],
+          qa.[PriorityNo],
           qa.[QtrLocation],
-          qa.[QtrRequested]
+          qa.[QtrRequested],
+          qa.[AttachmentPath]
         FROM dbo.Quarter_Applications qa
         WHERE qa.[Id] = @Id
       `);
 
     const row = current.recordset[0];
-    if (!row) return res.status(404).json({ error: "Not found" });
+    if (!row) return res.status(404).json({ error: "Application not found" });
 
-    // Mark as Rejected and clear RosterNo. DO NOT delete from dbo.Quarter_Applications!
-    // This allows computeDynamicAllotments to automatically skip to the next priority waiting employee while preserving application history.
-    await pool
-      .request()
-      .input("Id", sql.Int, id)
-      .query(`
-        UPDATE dbo.Quarter_Applications
-        SET Status = 'Rejected', RosterNo = NULL, UpdatedAt = SYSUTCDATETIME()
-        WHERE Id = @Id;
-      `);
+    // Authorization: If the caller is an employee, verify they own the application
+    const userRole = String(req.user?.role || "").toLowerCase();
+    const myUserId = Number(req.user?.sub);
+    const myEmpId = String(req.user?.username || "").trim().toUpperCase();
 
-    // Free up Estate_Quarters if it was already marked occupied by this employee
-    if (row.EmpId && row.QtrLocation && row.QtrRequested) {
+    if (userRole === "employee") {
+      const isOwner =
+        (row.UserId && Number(row.UserId) === myUserId) ||
+        (row.EmpId && String(row.EmpId).trim().toUpperCase() === myEmpId);
+
+      if (!isOwner) {
+        return res.status(403).json({ error: "You are only authorized to delete your own application." });
+      }
+    }
+
+    // Free up Estate_Quarters if it was marked occupied by this employee
+    const isOccupiedStatus = ["approved", "allotted", "occupied"].includes(String(row.Status || "").toLowerCase());
+    if (isOccupiedStatus && row.EmpId && row.QtrLocation && row.QtrRequested) {
       await pool
         .request()
         .input("areaType", sql.NVarChar, row.QtrLocation)
@@ -1757,14 +1826,53 @@ router.delete("/applications/:id", requireAuth, async (req, res) => {
         `);
     }
 
-    return res.json({ ok: true, message: "Application skipped/rejected successfully" });
+    // Delete attachment file from uploads directory if exists
+    if (row.AttachmentPath) {
+      try {
+        const uploadsDir = path.join(__dirname, "..", "..", "uploads");
+        const filePath = path.isAbsolute(row.AttachmentPath)
+          ? row.AttachmentPath
+          : path.join(uploadsDir, row.AttachmentPath);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (fileErr) {
+        console.warn("Could not remove attachment file:", fileErr.message);
+      }
+    }
+
+    // Permanently delete the application from dbo.Quarter_Applications
+    await pool
+      .request()
+      .input("Id", sql.Int, id)
+      .query(`
+        DELETE FROM dbo.Quarter_Applications
+        WHERE Id = @Id;
+      `);
+
+    // Shift priority numbers for subsequent applications instantaneously (5ms), or batch rebuild
+    const deletedPriority = Number(row.PriorityNo);
+    if (Number.isInteger(deletedPriority) && deletedPriority > 0) {
+      await pool
+        .request()
+        .input("DeletedPriority", sql.Int, deletedPriority)
+        .query(`
+          UPDATE dbo.Quarter_Applications
+          SET PriorityNo = PriorityNo - 1
+          WHERE PriorityNo > @DeletedPriority;
+        `);
+    } else {
+      await rebuildQuarterApplicationPriorityNumbers(pool);
+    }
+
+    return res.json({ ok: true, message: "Application permanently deleted successfully." });
   } catch (err) {
     console.error("Delete application error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
 
-router.post("/applications/:id/skip", requireAuth, async (req, res) => {
+router.post("/applications/:id/skip", requireAuth, requireRole("admin"), async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid id" });
 

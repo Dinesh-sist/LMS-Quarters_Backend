@@ -20,15 +20,21 @@ router.get("/vacant", requireAuth, async (req, res) => {
     let assignmentConditions = null;
     let pubResult = null;
     
+    let pubFromDate = null;
+    let pubToDate = null;
+
     try {
       pubResult = await pool.request().query(`
-        SELECT QuarterTypes, Assignments 
+        SELECT QuarterTypes, Assignments, From_Date, To_Date 
         FROM dbo.Publish 
         WHERE Current_State = 'Published' 
         ORDER BY PublishId DESC 
       `);
 
       if (pubResult.recordset.length > 0) {
+        pubFromDate = pubResult.recordset[0].From_Date || null;
+        pubToDate = pubResult.recordset[0].To_Date || null;
+
         const rawTypes = pubResult.recordset[0].QuarterTypes;
         if (rawTypes) {
           publishedTypes = rawTypes.split(',').map(t => t.trim()).filter(Boolean);
@@ -56,10 +62,25 @@ router.get("/vacant", requireAuth, async (req, res) => {
       console.error("Error reading circular:", e);
     }
 
+    let empId = "";
+    try {
+      const empRes = await pool
+        .request()
+        .input("UserId", sql.Int, Number(req.user.sub))
+        .query("SELECT TOP 1 EmployeeId FROM dbo.UserDetails WHERE UserId = @UserId");
+      empId = empRes.recordset?.[0]?.EmployeeId ? String(empRes.recordset[0].EmployeeId).trim() : "";
+    } catch (e) {
+      console.warn("Could not fetch EmpId for vacant quarters filtering:", e.message);
+    }
+
     const result = await pool
       .request()
       .input("ClassName", sql.NVarChar(60), className.trim())
       .input("UserId", sql.Int, Number(req.user.sub))
+      .input("Username", sql.NVarChar(100), req.user?.username ? String(req.user.username).trim() : "")
+      .input("EmpId", sql.NVarChar(100), empId)
+      .input("PubFrom", sql.Date, pubFromDate)
+      .input("PubTo", sql.Date, pubToDate)
       .query(`
         SELECT
             CAST(FLOOR(eq.OBJECTID) AS BIGINT)             AS Id,
@@ -67,7 +88,18 @@ router.get("/vacant", requireAuth, async (req, res) => {
             CAST(eq.AREA_TYPE AS NVARCHAR(64))         AS Location,
             CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))  AS QuarterNo,
             (COALESCE(app.ApplicationCount, 0) % 60) + 1 AS NextRosterNo,
-            'available' AS Status
+            'available' AS Status,
+            CASE WHEN EXISTS (
+                SELECT 1
+                FROM dbo.Quarter_Applications qa
+                WHERE (qa.UserId = @UserId OR (@Username <> '' AND qa.EmpId = @Username) OR (@EmpId <> '' AND qa.EmpId = @EmpId))
+                  AND CAST(qa.[QtrRequested] AS NVARCHAR(64)) = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
+                  AND CAST(qa.[QtrLocation] AS NVARCHAR(64)) = CAST(eq.AREA_TYPE AS NVARCHAR(64))
+                  AND CAST(qa.[QtrType] AS NVARCHAR(64)) = CAST(eq.CATEGORY AS NVARCHAR(64))
+                  AND (@PubFrom IS NULL OR CAST(qa.PublishedDateFrom AS DATE) = CAST(@PubFrom AS DATE))
+                  AND (@PubTo IS NULL OR CAST(qa.PublishedDateTo AS DATE) = CAST(@PubTo AS DATE))
+                  AND LOWER(LTRIM(RTRIM(CAST(qa.[Status] AS NVARCHAR(24))))) NOT IN ('rejected', 'cancelled', 'vacated')
+            ) THEN 1 ELSE 0 END AS IsAlreadyApplied
         FROM dbo.[Estate_Quarters] eq
         LEFT JOIN (
             SELECT
@@ -88,17 +120,6 @@ router.get("/vacant", requireAuth, async (req, res) => {
             )
             ${quarterTypesParam ? `AND eq.CATEGORY IN (${publishedTypes.map(t => "'" + t.replace(/'/g, "''") + "'").join(',')})` : ''}
             ${assignmentConditions ? assignmentConditions : ''}
-
-            AND NOT EXISTS (
-                -- Hide quarters that the CURRENT user has already applied for (if not rejected/cancelled)
-                SELECT 1
-                FROM dbo.Quarter_Applications qa
-                WHERE qa.UserId = @UserId
-                  AND CAST(qa.[QtrRequested] AS NVARCHAR(64)) = CAST(eq.[QUARTER NUMBER] AS NVARCHAR(64))
-                  AND CAST(qa.[QtrLocation] AS NVARCHAR(64)) = CAST(eq.AREA_TYPE AS NVARCHAR(64))
-                  AND CAST(qa.[QtrType] AS NVARCHAR(64)) = CAST(eq.CATEGORY AS NVARCHAR(64))
-                  AND LOWER(LTRIM(RTRIM(CAST(qa.[Status] AS NVARCHAR(24))))) NOT IN ('rejected', 'cancelled', 'vacated')
-            )
         ORDER BY eq.OBJECTID DESC
       `);
 
@@ -109,6 +130,7 @@ router.get("/vacant", requireAuth, async (req, res) => {
       QuarterNo: r.QuarterNo,
       NextRosterNo: r.NextRosterNo,
       Status: r.Status,
+      IsAlreadyApplied: Boolean(r.IsAlreadyApplied),
       IsAvailable: true
     }));
 
