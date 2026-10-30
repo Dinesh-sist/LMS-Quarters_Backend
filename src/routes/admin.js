@@ -1624,9 +1624,9 @@ router.post("/publish", upload.any(), async (req, res) => {
     if (req.file) {
       try {
         const emailsResult = await pool.request().query(`
-          SELECT EmailAddress FROM dbo.TestEmails
+          SELECT DISTINCT Username FROM dbo.Users WHERE Username IS NOT NULL AND Username LIKE '%@%'
         `);
-        const emails = emailsResult.recordset.map((row) => row.EmailAddress).filter(Boolean);
+        const emails = emailsResult.recordset.map((row) => row.Username?.trim()).filter(Boolean);
 
         if (emails.length > 0) {
           await sendCircularEmail(emails, req.file, fromDate, toDate);
@@ -2643,8 +2643,8 @@ router.post("/generate-circular", async (req, res) => {
 
     // ── Send email ────────────────────────────────────────────────────────────
     const pool = await getPool();
-    const emailsResult = await pool.request().query(`SELECT EmailAddress FROM dbo.TestEmails`);
-    const emails = emailsResult.recordset.map((r) => r.EmailAddress).filter(Boolean);
+    const emailsResult = await pool.request().query(`SELECT DISTINCT Username FROM dbo.Users WHERE Username IS NOT NULL AND Username LIKE '%@%'`);
+    const emails = emailsResult.recordset.map((r) => r.Username?.trim()).filter(Boolean);
 
     let emailSent = false;
     if (emails.length > 0) {
